@@ -38,7 +38,7 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
             sol.rdr[i] = 0
 
     tmodel = transitModel(sol, time, itime, nintg, ntt, tobs, omc) - zpt
-    flux = flux - zpt # Remove the zero point to always plot around 1
+    flux = flux # - zpt # Remove the zero point to always plot around 1
 
     # Second model with only the other planets to substract
     sol.rdr = rdr.copy()

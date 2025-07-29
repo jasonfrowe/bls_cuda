@@ -113,7 +113,7 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
 
     # Read phot class
     time = phot.time
-    flux = phot.flux - np.median(phot.flux) + 1
+    flux = phot.flux # - np.median(phot.flux) + 1
     ferror = phot.ferr
     itime = phot.itime
     
