@@ -489,66 +489,66 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
 
     width = np.min((int(ofac*1000)+1,nstep)) # clean up the 1/f ramp from BLS
     
-    params, covariance = curve_fit(one_over_f, freqs, np.sqrt(p))
-    alpha_fit, scale_fit = params
-    filtered = one_over_f(freqs, alpha_fit, scale_fit)
+    # params, covariance = curve_fit(one_over_f, freqs, np.sqrt(p))
+    # alpha_fit, scale_fit = params
+    # filtered = one_over_f(freqs, alpha_fit, scale_fit)
     
-    #  filtered = medfilt(np.sqrt(p), kernel_size=width) 
+    filtered = medfilt(np.sqrt(p), kernel_size=width) 
 
     data = np.sqrt(p) - filtered
     
-    # half_window = width 
-    # running_std = running_std_with_filter(data, half_window)
-    # power = (np.sqrt(p) - filtered)/running_std # This is our BLS statistic array for each frequency/period
+    half_window = width 
+    running_std = running_std_with_filter(data, half_window)
+    power = (np.sqrt(p) - filtered)/running_std # This is our BLS statistic array for each frequency/period
     
-    # Define the number of logarithmic bins
-    num_log_bins = 50 # Should be an input parameter
+    # # Define the number of logarithmic bins
+    # num_log_bins = 50 # Should be an input parameter
     
-    # Create logarithmically spaced bin edges
-    log_min = np.log10(freqs.min())
-    log_max = np.log10(freqs.max())
-    log_bins = np.logspace(log_min, log_max, num_log_bins)
+    # # Create logarithmically spaced bin edges
+    # log_min = np.log10(freqs.min())
+    # log_max = np.log10(freqs.max())
+    # log_bins = np.logspace(log_min, log_max, num_log_bins)
 
-    # Calculate the standard deviation in each bin. [1, 2]
-    binned_std, bin_edges, _ = stats.binned_statistic(
-        freqs,
-        data,
-        statistic=std_without_outliers,
-        bins=log_bins
-    )
-
-    # for test in zip(log_bins, binned_std):
-    #     print(1/test[0], test[1])
-
-    # Calculate the central frequency of each bin
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    # interpolated_std = interpolate_std(binned_std, bin_centers, freqs)
-    # power = data / interpolated_std
-    
-    # # It's possible some bins are empty and result in NaN. We should replace NaNs
-    # # with a reasonable value, like the mean of the other std values, or interpolate.
-    # # A simple approach is to forward-fill and then back-fill NaNs.
-    # valid_bins = ~np.isnan(binned_std)
-    # std_params, _ = curve_fit(
-    #     one_over_f, 
-    #     bin_centers[valid_bins], 
-    #     binned_std[valid_bins]
+    # # Calculate the standard deviation in each bin. [1, 2]
+    # binned_std, bin_edges, _ = stats.binned_statistic(
+    #     freqs,
+    #     data,
+    #     statistic=std_without_outliers,
+    #     bins=log_bins
     # )
-    # beta_fit, C_fit = std_params # beta and C are the parameters for the scatter model
 
-    # # Step 3c: Generate the smooth model for the scatter across all original frequencies
-    # fitted_std = one_over_f(freqs, beta_fit, C_fit)
+    # # for test in zip(log_bins, binned_std):
+    # #     print(1/test[0], test[1])
 
-    # valid_std_mask = (fitted_std > 0)
-    # power = np.zeros_like(p)
-    # power[valid_std_mask] = \
-    #     (np.sqrt(p[valid_std_mask]) - fitted_noise[valid_std_mask]) / fitted_std[valid_std_mask]
+    # # Calculate the central frequency of each bin
+    # bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-    std_fit = np.polyfit(bin_centers, binned_std, 3)
-    std_model = np.poly1d(std_fit)
+    # # interpolated_std = interpolate_std(binned_std, bin_centers, freqs)
+    # # power = data / interpolated_std
+    
+    # # # It's possible some bins are empty and result in NaN. We should replace NaNs
+    # # # with a reasonable value, like the mean of the other std values, or interpolate.
+    # # # A simple approach is to forward-fill and then back-fill NaNs.
+    # # valid_bins = ~np.isnan(binned_std)
+    # # std_params, _ = curve_fit(
+    # #     one_over_f, 
+    # #     bin_centers[valid_bins], 
+    # #     binned_std[valid_bins]
+    # # )
+    # # beta_fit, C_fit = std_params # beta and C are the parameters for the scatter model
 
-    power = data / std_model(freqs)
+    # # # Step 3c: Generate the smooth model for the scatter across all original frequencies
+    # # fitted_std = one_over_f(freqs, beta_fit, C_fit)
+
+    # # valid_std_mask = (fitted_std > 0)
+    # # power = np.zeros_like(p)
+    # # power[valid_std_mask] = \
+    # #     (np.sqrt(p[valid_std_mask]) - fitted_noise[valid_std_mask]) / fitted_std[valid_std_mask]
+
+    # std_fit = np.polyfit(bin_centers, binned_std, 3)
+    # std_model = np.poly1d(std_fit)
+
+    # power = data / std_model(freqs)
 
     psort = np.argsort(power) #Get sorted indicies to find best event
 
