@@ -21,6 +21,21 @@ except ImportError:  # Python 2.x
 
 import json
 
+# Data processing parameters  
+class tpy5_inputs_class:
+    def __init__(self):
+        self.photfile  = "filename.txt"
+        self.photdir   = "/path/to/photometry/"
+        self.roi       = 210.01 # Roman ID
+        self.boxbin    = 5.0    # Detrending window
+        self.gapsize   = 0.5    # Detection of gaps in the data -- we do not detrend over gaps
+        self.nfitp     = 2      # Order of polynomial for detrending.  2 = quadratic
+        self.dsigclip  = 3.0    # Sigma clipping for derivative routine
+        self.nsampmax  = 6      # Sample size for derivative routine
+        self.detrended = 0      # Track if detrended data is used/created
+        self.dataclip  = 0      # Track if clipped data is used/created 
+        self.fstd_cut  = 5      # Simple Sigma-clipping
+
 class exocat_class:
     def __init__(self):
         self.ticid=[]
