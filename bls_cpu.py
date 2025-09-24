@@ -488,6 +488,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     periods = 1/freqs # periods (days)
 
     width = np.min((int(ofac*1000)+1,nstep)) # clean up the 1/f ramp from BLS
+    if width % 2 == 0:
+        width = width - 1
     
     # params, covariance = curve_fit(one_over_f, freqs, np.sqrt(p))
     # alpha_fit, scale_fit = params
