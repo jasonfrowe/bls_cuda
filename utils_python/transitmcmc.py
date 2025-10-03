@@ -5,6 +5,36 @@ import utils_python.mcmcroutines as mcmc
 import transitfit5 as tf
 import time
 
+
+def setup_priors(sol):
+    """
+    Builds the lower and upper bound arrays for the priors.
+    This function should be called ONLY ONCE before the MCMC loop.
+    """
+    min_t = -1.0e9
+    max_t =  1.0e9
+
+    base_ubounds = np.array([1e3, 2, 1, 1, 1, 1, 1, 5, max_t, max_t, 2, 1, 1, 1, 5, 1e3, 1e3, 1e4])
+    base_lbounds = np.array([1e-4, 0, -1, 0, 0, 0, 0, -5, min_t, 0, 0, 0, -1, -1, -5, 0, -1e3, 0])
+    
+    npl = (len(sol) - transitm.nb_st_param) // transitm.nb_pl_param
+
+    if npl > 1:
+        planet_only_lbounds = base_lbounds[transitm.nb_st_param : (transitm.nb_st_param + transitm.nb_pl_param)]
+        planet_only_ubounds = base_ubounds[transitm.nb_st_param : (transitm.nb_st_param + transitm.nb_pl_param)]
+        
+        additional_lbounds = np.tile(planet_only_lbounds, npl - 1)
+        additional_ubounds = np.tile(planet_only_ubounds, npl - 1)
+
+        lbounds = np.hstack([base_lbounds, additional_lbounds])
+        ubounds = np.hstack([base_ubounds, additional_ubounds])
+    else:
+        lbounds = base_lbounds
+        ubounds = base_ubounds
+        
+    return lbounds, ubounds
+
+
 def genmcmcInput(sol, params_to_fit):
     """
     Returns the new log function, the sol array and the beta array to use for mcmc
@@ -27,13 +57,13 @@ def genmcmcInput(sol, params_to_fit):
 
     sol_a = sol.to_array()
 
-    def newLogprob(fit_sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
+    def newLogprob(fit_sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds):
         for i, ind in enumerate(id_to_fit):
             if ind in log_space_params:
                 sol_a[ind] = np.exp(fit_sol[i])
             else:
                 sol_a[ind] = fit_sol[i]
-        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc)
+        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds)
     
     err_a = sol.err_to_array()
 
@@ -110,8 +140,16 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 
     return phot_out
 
-def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
-    return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
+# def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
+#     return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
+def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds):
+    # The loglikehood call stays exactly the same for now
+    ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc)
+    
+    # The logprior call now passes the pre-built bounds instead of the 'time' array
+    lp = logprior(sol, lbounds, ubounds)
+    
+    return ll + lp
 
 def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
 
@@ -126,15 +164,17 @@ def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc
 
     return ll
 
-def logprior(sol, time):
+def logprior(sol,lbounds,ubounds):
     badprior = -np.inf
     lprior = 0
 
-    min_t = min(time)
-    max_t = max(time)
+    # # min_t = min(time)
+    # # max_t = max(time)
+    # min_t = -1.0e9
+    # max_t =  1.0e9
 
-    ubounds = np.array([1e3, 2, 1, 1, 1, 1, 1, 5, max_t, max_t, 2, 1, 1, 1, 5, 1e3, 1e3, 1e4])
-    lbounds = np.array([1e-4, 0, -1, 0, 0, 0, 0, -5, min_t, 0, 0, 0, -1, -1, -5, 0, -1e3, 0])
+    # ubounds = np.array([1e3, 2, 1, 1, 1, 1, 1, 5, max_t, max_t, 2, 1, 1, 1, 5, 1e3, 1e3, 1e4])
+    # lbounds = np.array([1e-4, 0, -1, 0, 0, 0, 0, -5, min_t, 0, 0, 0, -1, -1, -5, 0, -1e3, 0])
 
     npl = (len(sol) - transitm.nb_st_param) // transitm.nb_pl_param
 
@@ -162,6 +202,18 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
         tobs = np.zeros((n_planet, nb_pts)) # Time stamps of TTV measurements (days)
         omc = np.zeros((n_planet, nb_pts)) # TTV measurements (O-C) (days)
 
+    # ==================== NEW SETUP BLOCK ====================
+    selection_mask = (phot.icut == 0) & (phot.tflag == 1)
+    times  = phot.time[selection_mask]
+    flux_f = phot.flux_f[selection_mask]
+    ferr   = phot.ferr[selection_mask]
+    itime  = phot.itime[selection_mask]
+
+    # Call the setup function ONCE to get the prior bounds
+    lbounds, ubounds = setup_priors(sol_a) 
+
+    # =======================================================
+
     # Read params
     nsteps1 = params[0]
     nsteps2 = params[1]
@@ -178,11 +230,8 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     TPnsteps=5000
     TPnthin=1
     
-    chain,accept=mcmc.genchain(x,beta,TPnsteps,lnprob,mcmc.mhgmcmc,phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                               phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                               phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                               phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                               nintg, ntt, tobs, omc)
+    chain,accept=mcmc.genchain(x,beta,TPnsteps,lnprob,mcmc.mhgmcmc,
+                               times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds)
     
     runtest=np.array(tf.checkperT0(chain,burninf,TPnthin,sol_a,serr))
     print('runtest:',runtest)
@@ -197,11 +246,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
 
         #get better beta 
         corscale=mcmc.betarescale(x,beta,niter_cor,burnin_cor,lnprob,mcmc.mhgmcmc,
-                                  phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                  phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                  phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                  phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                  nintg, ntt, tobs, omc, imax=10)
+                                  times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds, imax=10)
         
         #first run with M-H to create buffer.
 
@@ -213,23 +258,11 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             nloop+=1 #count number of loops
             
             hchain1,haccept1=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           nintg, ntt, tobs, omc)
+                                           times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds)
             hchain2,haccept2=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           nintg, ntt, tobs, omc)
+                                           times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds)
             hchain3,haccept3=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                           nintg, ntt, tobs, omc)
+                                           times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds)
 
             if nloop==1:
                 chain1=np.copy(hchain1)
@@ -249,7 +282,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             burnin=int(chain1.shape[0]*burninf)
             mcmc.calcacrate(accept1,burnin)
 
-            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time[(phot.icut == 0) & (phot.tflag == 1)]))
+            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(times))
             print('Gelman-Rubin Convergence:')
             print('parameter  Rc')
             for i in range(0,len(chain1[1,:])):
@@ -293,27 +326,18 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             corbeta=0.3
             burnin=int(chain1.shape[0]*burninf)
             chain1,accept1=mcmc.genchain(x1,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
-                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
+                                         times, flux_f, ferr, itime,\
+                                         nintg, ntt, tobs, omc,lbounds,ubounds,buffer=buffer,corbeta=corbeta)
             chain2,accept2=mcmc.genchain(x2,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
-                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
+                                         times, flux_f, ferr, itime,\
+                                         nintg, ntt, tobs, omc,lbounds,ubounds,buffer=buffer,corbeta=corbeta)
             chain3,accept3=mcmc.genchain(x3,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
-                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
-                                         nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
+                                         times, flux_f, ferr, itime,\
+                                         nintg, ntt, tobs, omc,lbounds,ubounds,buffer=buffer,corbeta=corbeta)
 
             burnin=int(chain1.shape[0]*burninf)
 
-            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time[(phot.icut == 0) & (phot.tflag == 1)]))
+            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(times))
             print('Gelman-Rubin Convergence:')
             print('parameter  Rc')
             for i in range(0,len(chain1[1,:])):
