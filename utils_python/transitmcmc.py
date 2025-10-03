@@ -104,6 +104,7 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
     phot_out = tf.phot_class()
     phot_out.time = phot.time[condition]
     phot_out.flux = phot.flux[condition]
+    phot_out.flux_f = phot.flux_f[condition]
     phot_out.ferr = phot.ferr[condition]
     phot_out.itime = phot.itime[condition]
 
@@ -154,7 +155,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     start_time = time.time()
 
     n_planet = (len(sol_a) - transitm.nb_st_param) // transitm.nb_pl_param
-    nb_pts = len(phot.time)
+    nb_pts = len(phot.time[(phot.icut == 0) & (phot.tflag == 1)])
     # Handle TTV inputs
     if type(ntt) is int:
         ntt = np.zeros(n_planet, dtype="int32") # Number of TTVs measured 
@@ -177,7 +178,11 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     TPnsteps=5000
     TPnthin=1
     
-    chain,accept=mcmc.genchain(x,beta,TPnsteps,lnprob,mcmc.mhgmcmc,phot.time,phot.flux,phot.ferr,phot.itime,nintg, ntt, tobs, omc)
+    chain,accept=mcmc.genchain(x,beta,TPnsteps,lnprob,mcmc.mhgmcmc,phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                               phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                               phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                               phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
+                               nintg, ntt, tobs, omc)
     
     runtest=np.array(tf.checkperT0(chain,burninf,TPnthin,sol_a,serr))
     print('runtest:',runtest)
@@ -192,7 +197,11 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
 
         #get better beta 
         corscale=mcmc.betarescale(x,beta,niter_cor,burnin_cor,lnprob,mcmc.mhgmcmc,
-                                  phot.time,phot.flux,phot.ferr,phot.itime,nintg, ntt, tobs, omc, imax=10)
+                                  phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                  phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                  phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                  phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
+                                  nintg, ntt, tobs, omc, imax=10)
         
         #first run with M-H to create buffer.
 
@@ -204,11 +213,23 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             nloop+=1 #count number of loops
             
             hchain1,haccept1=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time,phot.flux,phot.ferr,phot.itime,nintg, ntt, tobs, omc)
+                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           nintg, ntt, tobs, omc)
             hchain2,haccept2=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time,phot.flux,phot.ferr,phot.itime,nintg, ntt, tobs, omc)
+                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           nintg, ntt, tobs, omc)
             hchain3,haccept3=mcmc.genchain(x,beta*corscale,TPnsteps,lnprob,mcmc.mhgmcmc,
-                                           phot.time,phot.flux,phot.ferr,phot.itime,nintg, ntt, tobs, omc)
+                                           phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
+                                           nintg, ntt, tobs, omc)
 
             if nloop==1:
                 chain1=np.copy(hchain1)
@@ -228,7 +249,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             burnin=int(chain1.shape[0]*burninf)
             mcmc.calcacrate(accept1,burnin)
 
-            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time))
+            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time[(phot.icut == 0) & (phot.tflag == 1)]))
             print('Gelman-Rubin Convergence:')
             print('parameter  Rc')
             for i in range(0,len(chain1[1,:])):
@@ -271,16 +292,28 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             x3=np.copy(chain1[chain1.shape[0]-1,:])
             corbeta=0.3
             burnin=int(chain1.shape[0]*burninf)
-            chain1,accept1=mcmc.genchain(x1,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,phot.time,phot.flux,phot.ferr,phot.itime,\
+            chain1,accept1=mcmc.genchain(x1,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
+                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
                                          nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
-            chain2,accept2=mcmc.genchain(x2,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,phot.time,phot.flux,phot.ferr,phot.itime,\
+            chain2,accept2=mcmc.genchain(x2,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
+                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
                                          nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
-            chain3,accept3=mcmc.genchain(x3,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,phot.time,phot.flux,phot.ferr,phot.itime,\
+            chain3,accept3=mcmc.genchain(x3,beta*corscale,nsteps,lnprob,mcmc.demhmcmc,\
+                                         phot.time[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.ferr[(phot.icut == 0) & (phot.tflag == 1)],\
+                                         phot.itime[(phot.icut == 0) & (phot.tflag == 1)],\
                                          nintg, ntt, tobs, omc,buffer=buffer,corbeta=corbeta)
 
             burnin=int(chain1.shape[0]*burninf)
 
-            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time))
+            grtest=mcmc.gelmanrubin(chain1,chain2,chain3,burnin=burnin,npt=len(phot.time[(phot.icut == 0) & (phot.tflag == 1)]))
             print('Gelman-Rubin Convergence:')
             print('parameter  Rc')
             for i in range(0,len(chain1[1,:])):

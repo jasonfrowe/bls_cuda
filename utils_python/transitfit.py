@@ -17,10 +17,10 @@ def analyseLightCurve(gbls_inputs):
     
     # Apply BLS
     gbls_inputs.zerotime = min(phot.time)
-    gbls_ans = gbls.bls(gbls_inputs, phot.time[phot.icut == 0], phot.flux[phot.icut == 0])
+    gbls_ans = gbls.bls(gbls_inputs, phot.time[phot.icut == 0], phot.flux_f[phot.icut == 0])
     
     # Fit using BLS answers
-    sol_fit = fitFromBLS(gbls_ans, phot.time - gbls_inputs.zerotime, phot.flux + 1, phot.ferr, phot.itime)
+    sol_fit = fitFromBLS(gbls_ans, phot.time - gbls_inputs.zerotime, phot.flux_f + 1, phot.ferr, phot.itime)
 
     return phot, sol_fit, gbls_ans
 
@@ -104,7 +104,7 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
     """
 
     n_planet = sol_obj.npl
-    nb_pts = len(phot.time)
+    nb_pts = len(phot.time[(phot.icut == 0) & (phot.tflag == 1)])
     # Handle TTV inputs
     if type(ntt) is int:
         ntt = np.zeros(n_planet, dtype="int32") # Number of TTVs measured 
@@ -112,10 +112,10 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
         omc = np.zeros((n_planet, nb_pts)) # TTV measurements (O-C) (days)
 
     # Read phot class
-    time = phot.time
-    flux = phot.flux # - np.median(phot.flux) + 1
-    ferror = phot.ferr
-    itime = phot.itime
+    time = phot.time[(phot.icut == 0) & (phot.tflag == 1)]
+    flux = phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)] # - np.median(phot.flux) + 1
+    ferror = phot.ferr[(phot.icut == 0) & (phot.tflag == 1)]
+    itime = phot.itime[(phot.icut == 0) & (phot.tflag == 1)]
     
     # Transform solution object to array
     sol = sol_obj.to_array()

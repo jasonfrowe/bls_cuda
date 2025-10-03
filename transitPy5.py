@@ -27,7 +27,7 @@ class tpy5_inputs_class:
         self.photfile  = "filename.txt"
         self.photdir   = "/path/to/photometry/"
         self.roi       = 210.01 # Roman ID
-        self.boxbin    = 5.0    # Detrending window
+        self.boxbin    = 2.0    # Detrending window
         self.gapsize   = 0.5    # Detection of gaps in the data -- we do not detrend over gaps
         self.nfitp     = 2      # Order of polynomial for detrending.  2 = quadratic
         self.dsigclip  = 3.0    # Sigma clipping for derivative routine
@@ -35,6 +35,17 @@ class tpy5_inputs_class:
         self.detrended = 0      # Track if detrended data is used/created
         self.dataclip  = 0      # Track if clipped data is used/created 
         self.fstd_cut  = 5      # Simple Sigma-clipping
+        self.rjd       = 2461345.5 # time offset for the roman JD used in the simulations
+        self.mstar     = 1.0    # Mass of star   [Msun]
+        self.rstar     = 1.0    # Radius of star [Rsun]
+        self.teff      = 5777   # Temperature of star [K]
+        self.logg      = 4.5    # Star gravity [cgs]
+        self.feh       = 0.0    # star metalicticity 
+        self.e_mstar   = 0.3    # Error in stellar mass [Msun]
+        self.e_rstar   = 0.3    # Error in stellar radius [Rsun]
+        self.e_teff    = 500    # Error in Teff [K]
+        self.e_logg    = 0.2    # Error in log(g) [cgs]
+        self.e_feh     = 0.3    # Error in FeH 
 
 class exocat_class:
     def __init__(self):

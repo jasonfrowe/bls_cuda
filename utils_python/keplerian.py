@@ -36,6 +36,38 @@ def solve_kepler_eq(eccn, Manom, Eanom, thres=1e-6, itmax=100):
 
     return Eanom
 
+def mark_intransit_data(phot, sol, tdurcut = 2.0):
+    '''
+    Usage: mark_intransit_data(phot, sol, tdurcut = 2)
+      - phot : phot class with photometry products
+      - sol  : transit model solution 
+      - tdurcut : 
+    '''
+
+    itime_med = np.median(phot.itime)
+    tdurcut_apply = tdurcut + itime_med #Pad tdurcut with integration time to account for smearing of transit by observation cadence 
+    
+    phot.tflag = np.zeros((phot.time.shape[0])) # pre-populate array to mark transit data (=1 when in transit)
+
+    for i in range(sol.npl): #loop over all planets
+
+        #Get period and T0 for current planet
+        per = sol.per[i]
+        epo = sol.t0[i]
+
+        #Calculate Phase
+        phase=(phot.time-epo)/per-np.floor((phot.time-epo)/per)
+        #Keep phase in bounds of -0.5 to 0.5
+        phase[phase<-0.5]+=1.0
+        phase[phase>0.5]-=1.0
+    
+        #cut out-of-transit data to run faster.
+        tdur = transitDuration(sol, i_planet = i)/per
+
+        if tdurcut>0:
+            phot.tflag[(phase>-tdurcut_apply*tdur)&(phase<tdurcut_apply*tdur)] = 1  #Mark in transit data
+
+
 def transitDuration(sol, i_planet=0):
     """
     Calculates the transit duration in the same unit as the period

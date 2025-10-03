@@ -16,12 +16,12 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
     """
 
     # Read phot class
-    time = phot.time
-    if np.isclose(np.median(phot.flux), 0, atol=0.2):
-        flux = phot.flux + 1
+    time = phot.time[(phot.icut == 0)]
+    if np.isclose(np.median(phot.flux_f), 0, atol=0.2):
+        flux = phot.flux_f[(phot.icut == 0)] + 1
     else:
-        flux = phot.flux
-    itime = phot.itime
+        flux = phot.flux_f[(phot.icut == 0)]
+    itime = phot.itime[(phot.icut == 0)]
 
     pl_to_plot -= 1 # Shift indexing to start at 0
 
@@ -79,8 +79,8 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
         i2 = len(model_sorted)
     ymin = min(model_sorted[i1:i2])
     ymax = max(model_sorted[i1:i2])
-    y1 = ymin - 0.1*(ymax-ymin) - 2.0*stdev
-    y2 = ymax + 0.1*(ymax-ymin) + 2.0*stdev
+    y1 = ymin - 0.1*(ymax-ymin) - 3.0*stdev
+    y2 = ymax + 0.1*(ymax-ymin) + 3.0*stdev
     if np.abs(y2 - y1) < 1.0e-10:
         y1 = min(flux)
         y2 = max(flux)
