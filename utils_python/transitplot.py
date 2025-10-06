@@ -62,6 +62,10 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
             ttcor = 0
         t = x - ttcor
         phase[i] = (t/per - np.floor(t/per) - ph1) * per*24
+        if phase[i] >  0.5 * per*24:
+            phase[i] -= per*24
+        if phase[i] < -0.5 * per*24:
+            phase[i] += per*24
 
     i_sort = np.argsort(phase)
     phase_sorted = phase[i_sort]
