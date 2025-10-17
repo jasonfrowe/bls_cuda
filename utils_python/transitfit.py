@@ -82,8 +82,8 @@ def createBounds(time, id_to_fit, sol_obj):
     max_t = max(time)
 
     # Rho and Rp/Rs are in log space
-    lower_bound = np.array([np.log(1e-4), 0, -1, 0, 0, 0, -np.inf, -np.inf, min_t, 0, 0, -np.inf, -1, -1, -np.inf, -np.inf, -np.inf, -np.inf])
-    upper_bound = np.array([np.log(1e3), 2, 1, 1, 1, 1, np.inf, np.inf, max_t, max_t, 2, 0, 1, 1, np.inf, np.inf, np.inf, np.inf])
+    lower_bound = np.array([np.log(1e-4), 0, -1, 0, 0, 0, -np.inf, -np.inf,      0, -np.inf, 0, -np.inf, -1, -1, -np.inf, -np.inf, -np.inf, -np.inf])
+    upper_bound = np.array([np.log(1e3),  2,  1, 1, 1, 1,  np.inf,  np.inf, np.inf,  np.inf, 2,       0,  1,  1,  np.inf,  np.inf,  np.inf,  np.inf])
 
     # Expand bounds for multiple planets
     for i in range(sol_obj.npl - 1):
@@ -140,8 +140,8 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
                 sol_full[ind] = np.exp(sol_free[i])
             else:
                 sol_full[ind] = sol_free[i]
-        
-        return transitToOptimize(sol_full, time, flux, ferror, itime, npl, nintg, ntt, tobs, omc)
+        ans = transitToOptimize(sol_full, time, flux, ferror, itime, npl, nintg, ntt, tobs, omc)
+        return ans
     
     bounds = createBounds(time, id_to_fit, sol_obj)
 
@@ -151,8 +151,22 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
         if i in id_to_fit:
             sol[i] = np.log(sol[i])
 
+
     res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
-                    args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc))
+                        args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc))
+
+    # res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
+    #                     args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc),
+    #                    ftol=1e-12, # Change in cost
+    #                    xtol=1e-12, # Change in parameters
+    #                    gtol=1e-12)
+
+    # res = least_squares(wrapperTransit, sol[id_to_fit], \
+    #                     args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc),
+    #                    ftol=1e-12, # Change in cost
+    #                    xtol=1e-12, # Change in parameters
+    #                    gtol=1e-12,
+    #                    method='lm')
 
     # Calculate error
     is_weighted = True
@@ -211,6 +225,9 @@ def transitToOptimize(sol, time, flux, ferror, itime, npl, nintg, ntt, tobs, omc
 
     y_model = transitm._transitModel(sol, time, itime, nintg, ntt, tobs, omc)
 
+    # print('hello')
+    # print(np.sum((y_model - flux)**2/ferror**2))
+
     return (y_model - flux)/ferror
 
 def calculate_parameter_errors(opt_result, residual_func_returns_weighted=True):
@@ -257,8 +274,8 @@ def calculate_parameter_errors(opt_result, residual_func_returns_weighted=True):
         try:
             covariance_matrix = np.linalg.inv(jtj)
         except np.linalg.LinAlgError:
-            print("Warning: Jacobian transpose * Jacobian is singular or near-singular.")
-            print("Using pseudo-inverse. Parameter errors might be unreliable, check correlations.")
+            # print("Warning: Jacobian transpose * Jacobian is singular or near-singular.")
+            # print("Using pseudo-inverse. Parameter errors might be unreliable, check correlations.")
             covariance_matrix = np.linalg.pinv(jtj)
 
         if not residual_func_returns_weighted:
