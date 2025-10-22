@@ -31,8 +31,13 @@ except ImportError:  # Python 2.x
 
 import json
 
-def fit_ttvs(phot, sol_fit, ntt=-1, tobs=-1, omc=-1):
-    flag = 0 # if flag=0 do not predict next time, flag=1 predict next
+def fit_ttvs(phot, sol_fit, ntt=-1, tobs=-1, omc=-1, pflag = 0, pstart = 0):
+
+    if isinstance(pflag, int):
+        pflag = np.ones((sol_fit.npl),dtype=int)*pflag
+
+    if isinstance(pstart, int):
+        pstart = np.ones((sol_fit.npl),dtype=int)*pstart
     
     flux_f_copy = np.copy(phot.flux_f)
     
@@ -76,19 +81,20 @@ def fit_ttvs(phot, sol_fit, ntt=-1, tobs=-1, omc=-1):
     
         # T0=sol(9)                +int((     Tmin-sol(9)                 )/sol(10)               +0.0d0)*sol(10)
         T0 = sol_fit.t0[nplanet]+np.floor((Tmin-sol_fit.t0[nplanet])/sol_fit.per[nplanet]+0.0  )*sol_fit.per[nplanet]
-    
-        ttold = 0.0 # Used for large TTVs only 
-        dtold = 0.0
+
+        cal_omc     = pstart[nplanet]
+        cal_omc_old = 0.0
+        d_cal_omc   = 0.0
     
         tt      = []
+        # print(pflag[nplanet])
         while(T0 < Tmax):
-    
-            Ts = T0 - 2.0*tdur + ttold + dtold
-            Te = T0 + 2.0*tdur + ttold + dtold
-            Ts2= T0 - 0.5*tdur + ttold - 0.021 + dtold # add 30-mins
-            Te2= T0 + 0.5*tdur + ttold + 0.021 + dtold
-    
-            sol_c.t0[0] = T0 + ttold + dtold
+
+            Ts = T0 - 2.0*tdur + cal_omc         + d_cal_omc
+            Te = T0 + 2.0*tdur + cal_omc         + d_cal_omc
+            Ts2= T0 - 0.5*tdur + cal_omc - 0.021 + d_cal_omc  # add 30-mins
+            Te2= T0 + 0.5*tdur + cal_omc + 0.021 + d_cal_omc  
+            sol_c.t0[0] = T0   + cal_omc         + d_cal_omc
     
             params_to_fit = ["t0"]
             phot.tflag = np.zeros((phot.time.shape[0]))
@@ -96,21 +102,26 @@ def fit_ttvs(phot, sol_fit, ntt=-1, tobs=-1, omc=-1):
             k =  len(phot.time[(phot.time >= Ts2) & (phot.time <= Te2)])
             # print(T0, k)
             if k > 3:
+                
+                cal_omc_old = cal_omc 
+                
                 sol_c_fit = transitf.fitTransitModel(sol_c, params_to_fit, phot)
+
+                cal_omc = sol_c_fit.t0[0] - T0
+                d_cal_omc = cal_omc - cal_omc_old
     
-                tt.append([sol_c.t0[0], sol_c_fit.t0[0] - sol_c.t0[0], sol_c_fit.dt0[0]])
+                tt.append([T0, cal_omc, sol_c_fit.dt0[0]])
     
-            # dtold  = ttold 
-            # ttold2 = sol_c_fit.t0[0] - sol_c.t0[0] - ttold
-            # ttold  = sol_c_fit.t0[0] - sol_c.t0[0]
-            # dtold  = ttold - dtold
+            else:
+                cal_omc += d_cal_omc
     
             T0 = T0 + sol_fit.per[nplanet]
     
-            # if flag == 0:
-            #     ttold=0.0  # check if we are using predictive
-            #     dtold=0.0
-    
+            if pflag[nplanet] == 0:
+                cal_omc   = 0.0  # check if we are using predictive
+                d_cal_omc = 0.0
+
+            # print(cal_omc, cal_omc_old, d_cal_omc)
             # input()
     
         tt_list.append(np.array(tt))
