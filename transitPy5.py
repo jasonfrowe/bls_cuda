@@ -245,8 +245,17 @@ def get_photometry(koi_df, raw = 0, ztime = 54899.5):
             file_url,
             sep=r'\s+',
             header=None,
-            names=['time', 'flux', 'flux_err']
         )
+
+        if len(photometry_df.columns) == 4:
+            photometry_df.columns = ['time', 'flux', 'flux_err', 'itime']
+        elif len(photometry_df.columns) == 3:
+            photometry_df.columns = ['time', 'flux', 'flux_err']
+        else:
+            print(f"Warning: The data file at {file_url} contains an unexpected "
+                  f"number of columns ({len(photometry_df.columns)}).")
+            return None
+        
     except HTTPError:
         print(f"Error: Could not retrieve data file at {file_url}. It may not exist (404 Not Found).")
         return None, None, None
@@ -259,7 +268,10 @@ def get_photometry(koi_df, raw = 0, ztime = 54899.5):
     phot.flux = photometry_df['flux'].to_numpy() + 1.0 #Offset to 1.
     phot.ferr = photometry_df['flux_err'].to_numpy()
 
-    phot.itime = np.ones((phot.time.shape[0])) * 1765.5/86400.0 # Long cadence integration time
+    if len(photometry_df.columns) == 3:
+        phot.itime = np.ones((phot.time.shape[0])) * 1765.5/86400.0 # Long cadence integration time
+    else:
+        phot.itime = photometry_df['itime'].to_numpy()
 
     phot.tflag = np.zeros(len(phot.time))  # Flag for in-transit data
     phot.icut  = np.zeros(len(phot.time))  # Flag for data cuts 
