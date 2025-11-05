@@ -89,6 +89,10 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
         y1 = min(flux)
         y2 = max(flux)
 
+    #Make sure data outliers are seen.
+    y1 = np.min([y1, min(flux)])
+    y2 = np.max([y2, max(flux)])
+
     mpl.rcParams.update({'font.size': 22}) # Adjust font
     plt.figure(figsize=(12,6)) # Adjust size of figure
     plt.scatter(phase, fplot, c="blue", s=100.0, alpha=0.35, edgecolors="none") #scatter plot
