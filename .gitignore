@@ -4,9 +4,7 @@ testing_data.ipynb
 transit_fit_ex.ipynb
 ttv_test.ipynb
 utils/
-
-
-
+depreciated/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
