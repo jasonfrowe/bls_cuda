@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pytfit5"
 version = "1.0.0"
 authors = [
-  { name="Jason Rowe", email="jason@example.com" },
+  { name="Jason Rowe", email="jason@jasonrowe.org" },
 ]
 description = "An implementation of TransitFit5 with Python."
 readme = "README.md"
