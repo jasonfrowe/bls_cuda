@@ -545,7 +545,10 @@ class tpy5_inputs_class:
         self.boxbin    = 2.0    # Detrending window
         self.gapsize   = 0.5    # Detection of gaps in the data -- we do not detrend over gaps
         self.nfitp     = 2      # Order of polynomial for detrending.  2 = quadratic
-        self.dsigclip  = 3.0    # Sigma clipping for derivative routine
+        self.dsigclip  = 3.0    # Sigma clipping for derivative 
+        self.sigclip   = 3.0    # Sigma clipping for simple clipping
+        self.boxwindow = 0.5    # Box size for simple clipping [days]
+        self.boxsigma  = 5.0    # Box size for simple clipping [days]
         self.nsampmax  = 6      # Sample size for derivative routine
         self.detrended = 0      # Track if detrended data is used/created
         self.dataclip  = 0      # Track if clipped data is used/created 
@@ -934,6 +937,90 @@ def get_data_and_catalogues(tpy5_inputs):
 
     return toi_index, phot_SC, toicat
 
+def time_window_clip(phot, tpy5_inputs, max_iters=5):
+    """
+    Performs iterative sigma clipping using a rolling time window.
+    
+    Parameters
+    ----------
+    phot : phot_class
+        The object containing .time, .flux_f, and .icut
+    window_width : float
+        The width of the window in the same units as phot.time (usually days).
+    threshold : float
+        Number of standard deviations to clip.
+    max_iters : int
+        Maximum number of clipping iterations to run.
+        
+    Returns
+    -------
+    phot : phot_class
+        The object with updated .icut (modified in-place).
+    """
+
+    window_width = tpy5_inputs.boxwindow
+    threshold = tpy5_inputs.boxsigma
+
+    # 1. Create a DataFrame for easy time handling
+    df = pd.DataFrame({
+        'time': phot.time,
+        'flux': phot.flux_f,
+        'icut': phot.icut
+    })
+
+    # 2. Convert time to a DatetimeIndex
+    # Pandas needs datetime objects to do time-based rolling. 
+    # We treat the float time as "days" relative to a dummy epoch.
+    df.index = pd.to_datetime(df['time'], unit='D', origin='unix')
+
+    # Convert window_width (float days) to a string format Pandas understands
+    window_str = f"{window_width}D"
+
+    print(f"Starting clipping: Window={window_width} days, Sigma={threshold}")
+
+    for i in range(max_iters):
+        # Count currently rejected points
+        n_bad_start = df['icut'].sum()
+
+        # 3. Mask bad data for the calculation
+        # valid_flux is a Series where icut=1 values are set to NaN
+        valid_flux = df['flux'].where(df['icut'] == 0)
+
+        # 4. Calculate Rolling Statistics
+        roller = valid_flux.rolling(window=window_str, center=True, min_periods=1)
+        
+        roll_median = roller.median()
+        roll_std = roller.std()
+
+        # 5. Identify Outliers
+        # FIX: Use .bfill() and .ffill() instead of deprecated fillna(method=...)
+        roll_std = roll_std.bfill().ffill()
+
+        # Calculate deviation from local median
+        deviation = np.abs(df['flux'] - roll_median)
+        
+        # Find points that exceed threshold
+        # fillna(False) is still valid because we are providing a value, not a method
+        is_outlier = (deviation > (threshold * roll_std)).fillna(False)
+
+        # 6. Update the Mask
+        # We perform a bitwise OR to keep previously flagged bad points
+        new_mask = df['icut'] | is_outlier.astype(int)
+        
+        # Check if we found anything new
+        n_bad_end = new_mask.sum()
+        diff = n_bad_end - n_bad_start
+        
+        df['icut'] = new_mask
+        
+        print(f"  Iteration {i+1}: flagged {diff} new outliers.")
+        
+        if diff == 0:
+            break
+
+    # 7. Write results back to the class object
+    phot.icut = df['icut'].values
+
 def calc_meddiff(npt, x):
     """
     Used by cutoutliers to calculation distribution of derivatives
@@ -950,9 +1037,19 @@ def calc_meddiff(npt, x):
 
     return meddiff
 
+def run_sigclip_global(phot, tpy5_inputs):
+    """
+    Simple sigma-clipping of data
+    """
+
+    med = np.median(phot.flux_f[(phot.icut==0)])
+    std = np.std(phot.flux_f[(phot.icut==0)])
+    phot.icut[np.abs(phot.flux_f - med) > tpy5_inputs.sigclip * std] = 1
+    tpy5_inputs.dataclip = 1
+
 def run_cutoutliers(phot, tpy5_inputs):
 
-    phot.icut = cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip)
+    phot.icut = np.maximum(cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip), phot.icut)
     tpy5_inputs.dataclip = 1 
     
 def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
