@@ -7,6 +7,9 @@ utils/
 depreciated/
 3288.01.h5
 
+# Mac stuff
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
