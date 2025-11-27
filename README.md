@@ -1,7 +1,3 @@
-Here is a clean, modern `README.md` template tailored to your specific setup. It highlights the new installation method, points to the correct notebook, and explicitly warns about the deprecated command line tools.
-
-You can copy and paste the following markdown code directly into your `README.md` file.
-
 # pytfit5
 
 **An implementation of TransitFit5 and BLS in Python (with Numba).**
