@@ -30,16 +30,13 @@ It is recommended to install this package in "editable" mode inside a virtual en
 You can import the package and access the submodules (BLS, Keplerian, MCMC, etc.) directly.
 
 ```python
-import pytfit5 as pt
+import pytfit5 as pytfit5
 
 # Access submodules using the built-in aliases:
-# pt.gbls   -> bls_cpu
-# pt.tpy5   -> transitPy5
-# pt.kep    -> keplerian
-# pt.tmcmc  -> transitmcmc
-
-# Example: Running the CPU BLS
-pt.gbls.run_bls(...)
+# pytfit5.gbls   -> bls_cpu
+# pytfit5.tpy5   -> transitPy5
+# pytfit5.kep    -> keplerian
+# pytfit5.tmcmc  -> transitmcmc
 ```
 
 ### Jupyter Notebook Example
