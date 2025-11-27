@@ -27,7 +27,7 @@ It is recommended to install this package in "editable" mode inside a virtual en
 ## Usage
 
 ### Python Import (Recommended)
-You can import the package and access the submodules (BLS, Keplerian, MCMC, etc.) directly.
+You can import the package and access the submodules (BLS, transitfit5, MCMC, etc.) directly.
 
 ```python
 import pytfit5 as pytfit5
