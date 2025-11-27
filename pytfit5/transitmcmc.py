@@ -1,8 +1,8 @@
 import numpy as np
-import utils_python.transitmodel as transitm
-import utils_python.keplerian as kep
-import utils_python.mcmcroutines as mcmc
-import transitfit5 as tf
+import pytfit5.transitmodel as transitm
+import pytfit5.keplerian as kep
+import pytfit5.mcmcroutines as mcmc
+import pytfit5.transitPy5 as tpy5
 import time
 
 
@@ -131,12 +131,8 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 
         condition |= (phase > -tdurcut*tdur) & (phase < tdurcut*tdur)
 
-    phot_out = tf.phot_class()
-    phot_out.time = phot.time[condition]
-    phot_out.flux = phot.flux[condition]
-    phot_out.flux_f = phot.flux_f[condition]
-    phot_out.ferr = phot.ferr[condition]
-    phot_out.itime = phot.itime[condition]
+    phot_out = tpy5.phot_class()
+    phot_out = phot[condition]
 
     return phot_out
 
@@ -233,7 +229,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     chain,accept=mcmc.genchain(x,beta,TPnsteps,lnprob,mcmc.mhgmcmc,
                                times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds)
     
-    runtest=np.array(tf.checkperT0(chain,burninf,TPnthin,sol_a,serr))
+    runtest=np.array(tpy5.checkperT0(chain,burninf,TPnthin,sol_a,serr))
     print('runtest:',runtest)
     runtest2 = runtest + 1.0e-10 #add small eps to avoid division by zero.
     if int(np.sum(runtest2[runtest2<1.0]/runtest2[runtest2<1.0]))==4.0:
@@ -293,7 +289,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
                 mcmcloop=True
                 nsteps+=nsteps1
                 
-            runtest=np.array(tf.checkperT0(chain1,burninf,TPnthin,sol_a,serr))
+            runtest=np.array(tpy5.checkperT0(chain1,burninf,TPnthin,sol_a,serr))
             print('runtest:',runtest)
             if int(np.sum(runtest[runtest<1.0]/runtest[runtest<1.0]))!=4.0:
                 mcmcloop=False #run-away
@@ -357,7 +353,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             nsteps+=nsteps_inc #make longer chain to help with convergence
             
             #check for run-away Chain.
-            runtest=np.array(tf.checkperT0(chain1,burninf,nthin,sol_a,serr))
+            runtest=np.array(tpy5.checkperT0(chain1,burninf,nthin,sol_a,serr))
             print('runtest:',runtest)
             if int(np.sum(runtest[runtest<1.0]/runtest[runtest<1.0]))!=4.0:
                 mcmcloop=False #run-away

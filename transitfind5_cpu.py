@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
-import bls_cpu as gbls
+import pytfit5.bls_cpu as gbls
 
 def print_usage():
     

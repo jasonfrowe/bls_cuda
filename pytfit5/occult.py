@@ -1,5 +1,5 @@
 import numpy as np
-from utils_python.elliptic_int import ellE, ellK, ellPi
+from pytfit5.elliptic_int import ellE, ellK, ellPi
 from numba import njit
 
 @njit

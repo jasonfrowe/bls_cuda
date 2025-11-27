@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.optimize import least_squares
-import utils_python.transitmodel as transitm
+import pytfit5.transitmodel as transitm
+import pytfit5.transitPy5 as tpy5
+import pytfit5.bls_cpu as gbls
 
 def analyseLightCurve(gbls_inputs):
     """

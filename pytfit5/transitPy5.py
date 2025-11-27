@@ -1,33 +1,30 @@
 import sys
 import os
+from urllib.error import HTTPError
 
 import pandas as pd
 
 import numpy as np
+import copy 
 from astroquery.mast import Observations, Catalogs
 from astropy.io import fits
 
-import utils_python.transitmodel as transitm
-import utils_python.keplerian as kep
-import utils_python.transitfit as transitf
+import pytfit5.transitmodel as transitm
+import pytfit5.keplerian as kep
+import pytfit5.transitfit as transitf
 import matplotlib.pyplot as plt  #MatPlotLib for some simple plots 
+
+from scipy import stats #For Kernel Density Estimation
 
 # Nice for keeping an eye on progress.
 from tqdm import trange
 
 import concurrent.futures
 
-try: # Python 3.x
-    from urllib.parse import quote as urlencode
-    from urllib.request import urlretrieve
-except ImportError:  # Python 2.x
-    from urllib import pathname2url as urlencode
-    from urllib import urlretrieve
+from urllib.parse import quote as urlencode
+from urllib.request import urlretrieve
 
-try: # Python 3.x
-    import http.client as httplib
-except ImportError:  # Python 2.x
-    import httplib
+import http.client as httplib
 
 import json
 
@@ -584,10 +581,31 @@ class exocat_class:
 
 class phot_class:
     def __init__(self):
-        self.time=[]  #initialize arrays
+        self.time=[]   #initialize arrays
         self.flux=[]
         self.ferr=[]
         self.itime=[]
+        self.tflag=[]  #in-transit flag
+        self.icut=[]   #data cut flag
+        self.flux_f=[] #processed flux
+
+    def __getitem__(self, index):
+        # 1. Create a fresh instance
+        new_obj = phot_class()
+        
+        # 2. Iterate over all attributes in the current object
+        for key, value in self.__dict__.items():
+            
+            # 3. Check if it is a numpy array that should be sliced
+            # (You might want to add a check for length to avoid slicing mismatched arrays)
+            if isinstance(value, np.ndarray) and len(value) == len(self.time):
+                # Apply the slice/mask
+                setattr(new_obj, key, value[index])
+            else:
+                # Pass through non-array attributes (like names/IDs)
+                setattr(new_obj, key, copy.deepcopy(value))
+                
+        return new_obj
 
 class catalogue_class:
     def __init__(self):
@@ -1222,3 +1240,153 @@ def find_closest(array_list, array_values):
     bad_diffs = array_list - array_values[closest_indices]
 
     return closest_indices, bad_diffs
+
+
+def checkperT0(samples,burninfrac,nthin,sol,serr):
+    
+    #get indices of Period and T0 from chain
+    nparsol=len(sol)
+    j=-1
+    iT0=-1
+    iPer=-1
+    for i in range(nparsol):
+        if np.abs(serr[i])>1.0e-10:
+            j+=1
+            if i==8:
+                iT0=j
+            if i==9:
+                iPer=j
+                
+    #print('ii',iT0,iPer)
+    
+    nburnin=len(samples)*burninfrac
+    burnin=int(nburnin/nthin) #correct burnin using nthin.
+
+    chain=np.array(samples)
+    chain=chain[::nthin,:] #Thin out chain.
+    #print('Thin size: ',len(chain))
+    #print('Burnin: ',burnin)
+
+    if burnin > 0:
+        burnin_bak=np.copy(burnin)
+    else:
+        burnin=np.copy(burnin_bak)
+    sigcut=4
+    niter=3
+    for k in range(niter):
+        npars=chain.shape[1]
+        test=np.copy(chain[burnin:,:])
+        for i in range(npars):
+            nch=test.shape[0]
+            #print(nch)
+            mean=np.mean(test[:,i])
+            std=np.std(test[:,i])
+            #print(mean,std)
+            if std>0.0:
+                test2=[]
+                for j in range(nch):
+                    #print(test[j,i], np.abs(test[j,i]-mean),std*sigcut)
+                    #input()
+                    if np.abs(test[j,i]-mean) < sigcut*std:
+                        test2.append(test[j,:])
+                test=np.array(test2)
+        nch=test.shape[0]
+        #print("nchains:",nch)
+        chain=np.copy(test)
+        burnin=0
+    
+    
+    if iT0>-1:
+        mode,x_eval,kde1=modekdestimate(chain[:,iT0],burnin)
+        perc1 = intperc(mode,x_eval,kde1)
+        t0_ep=np.abs(perc1[1]-mode)
+        t0_em=np.abs(mode-perc1[0])
+    else:
+        t0_ep=0.0
+        t0_em=0.0
+    
+    if iPer>-1:
+        mode,x_eval,kde1=modekdestimate(chain[:,iPer],burnin)
+        perc1 = intperc(mode,x_eval,kde1)
+        per_ep=np.abs(perc1[1]-mode)
+        per_em=np.abs(mode-perc1[0])
+    else:
+        per_ep=0.0
+        per_em=0.0
+        
+    return t0_ep,t0_em,per_ep,per_em
+
+def modekdestimate(chain,burnin):
+    'Estimate Mode with KDE and return KDE'
+    #range of data
+    minx=np.min(chain[burnin:])
+    maxx=np.max(chain[burnin:])
+    x_eval = np.linspace(minx, maxx, num=1000)
+    kde1 = stats.gaussian_kde(chain[burnin:])#,0.3)
+    modeval=[]
+    modekde=0
+    for x in x_eval:
+        if kde1(x) > modekde:
+            modekde=kde1(x)
+            modeval=x
+    return modeval,x_eval,kde1
+
+def intperc(x,x_eval,kde1,perc=0.6827):
+    'find error bounds'
+    idx = (np.abs(x_eval-x)).argmin()
+    kdea=np.array(kde1(x_eval))
+
+    n=len(x_eval)
+
+    #print(x,idx)
+
+    i1=1
+    i2=1
+    intval=0.0
+
+    j1=np.copy(idx)
+    j2=np.copy(idx)
+    j1old=np.copy(j1)
+    j2old=np.copy(j2)
+    while intval < perc:
+        j1test=np.max((0,idx-i1-1))
+        j2test=np.min((n-1,idx+i2+1))
+        if kdea[j1test] > kdea[j2test]:
+            if j1test>0:
+                j1=np.copy(j1test)
+                i1=i1+1
+            else:
+                j1=np.copy(j1test)
+                j2=np.copy(j2test)
+                i2=i2+1
+            #print('case1')
+        else:
+            if j2test<n-1:
+                j2=np.copy(j2test)
+                i2=i2+1
+            else:
+                j2=np.copy(j2test)
+                j1=np.copy(j1test)
+                i1=i1+1
+            #print('case2')
+
+        intval=np.trapz(kdea[j1:j2],x_eval[j1:j2])
+        #print(j1,j2,intval,kdea[j1test],kdea[j2test])
+
+        #make sure we can break from loop
+        if (j1 == 0) and (j2 == n-1):  #break we reach boundaries of array
+            #print('break1')
+            intval=1.0
+        if (j1 == j1old) and (j2 == j2old): #break if stuck in loop.
+            #print('break2')
+            intval=1.0
+
+        #Update old values to check we are making progress.
+        j1old=np.copy(j1)
+        j2old=np.copy(j2)
+
+    #print(x_eval[j1],x_eval[j2])
+    return x_eval[j1],x_eval[j2];
+
+
+

@@ -25,7 +25,7 @@ To get started with this project, follow these steps:
 
 ## Contributing
 If you'd like to contribute to this project, go for it! There are a number of to-dos 
-1. Code speed can likely be made much faster.  (shared memory vs global memory)
+1. ~~Code speed can likely be made much faster.  (shared memory vs global memory)~~
 2. ~~Better choices of blocks and threads-per-block needs to be explored~~
 3. Making the code base into an installable package
 4. ~~Make CPU threading more efficient (spread around short-period jobs that take longer)~~
@@ -46,6 +46,7 @@ Rowe et al. 2014 ApJ, 784, 45
 Rowe et al. 2015 ApJs, 217, 16  
 
 ## Change Log
+2025/11/27 : Big refresh of the code base.  First steps to pip installable package
 2025/03/08 : Initial Update  
 2025/03/09 : Added a 'V2'.  V2 works best with TESS CVZ lc, V1 works best with Kepler.  
 2025/03/09 : Added CPU version (Numba + threading)  

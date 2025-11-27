@@ -1,7 +1,7 @@
 import numpy as np
-import utils_python.keplerian as kep
-import utils_python.occult as occ
-from utils_python.effects import albedoMod, ttv_lininterp
+import pytfit5.keplerian as kep
+import pytfit5.occult as occ
+from pytfit5.effects import albedoMod, ttv_lininterp
 from numba import njit, prange
 
 # Constants

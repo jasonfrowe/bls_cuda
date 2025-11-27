@@ -1,9 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from utils_python.transitmodel import transitModel
-from utils_python.keplerian import transitDuration
-from utils_python.effects import ttv_lininterp
+from pytfit5.transitmodel import transitModel
+from pytfit5.keplerian import transitDuration
+from pytfit5.effects import ttv_lininterp
 
 def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
     """
