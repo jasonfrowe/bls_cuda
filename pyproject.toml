@@ -34,4 +34,5 @@ dependencies = [
 
 # This section tells setuptools where to find your code
 [tool.setuptools.packages.find]
-where = ["pytfit5"]
+where = ["."]  # "." means "look in the same directory as this file"
+include = ["pytfit5*"]  # Explicitly include your package folder
