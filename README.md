@@ -8,7 +8,6 @@ This package provides tools for transit search and fitting, including Box-Least-
 
 ### Prerequisites
 *   Python 3.8+
-*   **For GPU acceleration:** A working NVIDIA GPU and CUDA drivers installed on your system.
 
 ### Installing from Source
 It is recommended to install this package in "editable" mode inside a virtual environment. This allows you to modify the source code without needing to reinstall.
@@ -67,9 +66,12 @@ Jason Rowe - jason@jasonrowe.org
 If you'd like to contribute to this project, go for it! There are a number of to-dos 
 1. ~~Code speed can likely be made much faster.  (shared memory vs global memory)~~
 2. ~~Better choices of blocks and threads-per-block needs to be explored~~
-3. Making the code base into an installable package
+3. ~~Making the code base into an installable package~~
 4. ~~Make CPU threading more efficient (spread around short-period jobs that take longer)~~
-5. and much more.. 
+5. Optimizing GPU memory transfers
+6. Allow transit modelling to have different parameters for different planets
+7. Better examples for TTV fitting
+8. and much more.. 
 
 ## License
 This project is licensed under the GNU General Public License (GPL) version 3 or later.
@@ -78,6 +80,8 @@ This project is licensed under the GNU General Public License (GPL) version 3 or
 Thank you to Canada Research Chairs, NSERC Discovery, Digital Alliance Canada, Calcul Quebec, FRQNT for financial and hardware support.
 
 This code was initially developed during the Bishop's University Winter Reading Week, making good use of profession development resources. 
+
+The implementation of [TransitFit5](https://github.com/jasonfrowe/Kepler) in Python was developed by Alexis Roy (Universite de Sherbrooke) supported by an NSERC Undergraduate Student Research Award (USRA) and iREx Trottier Fellowship.
 
 This code is directly adopted from Kovacs et al. 2002 : A box-fitting algorithm in the search for periodic transits 
 
