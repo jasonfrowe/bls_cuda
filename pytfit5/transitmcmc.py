@@ -140,10 +140,17 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 #     return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
 def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds):
     # The loglikehood call stays exactly the same for now
+    # print("sol_a:", sol)
     ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc)
+    if np.isnan(ll):
+        ll = -1.0e30
     
     # The logprior call now passes the pre-built bounds instead of the 'time' array
     lp = logprior(sol, lbounds, ubounds)
+    # if np.isinf(lp):
+    #     lp = 0
+
+    # print('LogLikehood:', ll, ' LogPrior:', lp, ' LogProb:', ll + lp)
     
     return ll + lp
 
@@ -184,7 +191,7 @@ def logprior(sol,lbounds,ubounds):
             continue
         else:
             return badprior
-    
+
     return lprior
 
 def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, tobs=-1, omc=-1):
@@ -231,7 +238,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     
     runtest=np.array(tpy5.checkperT0(chain,burninf,TPnthin,sol_a,serr))
     print('runtest:',runtest)
-    runtest2 = runtest + 1.0e-10 #add small eps to avoid division by zero.
+    runtest2 = runtest + 1.0e-5 #add small eps to avoid division by zero.
     if int(np.sum(runtest2[runtest2<1.0]/runtest2[runtest2<1.0]))==4.0:
         TPflag=1 #flag for looping until convergence is met.
     else:
@@ -243,6 +250,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
         #get better beta 
         corscale=mcmc.betarescale(x,beta,niter_cor,burnin_cor,lnprob,mcmc.mhgmcmc,
                                   times,flux_f,ferr,itime,nintg, ntt, tobs, omc, lbounds, ubounds, imax=10)
+        # corscale = np.ones(len(beta)) # TEMPORARY FIX: Disable beta rescaling due to issues with small step sizes
         
         #first run with M-H to create buffer.
 

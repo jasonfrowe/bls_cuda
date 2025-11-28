@@ -547,8 +547,8 @@ class tpy5_inputs_class:
         self.nfitp     = 2      # Order of polynomial for detrending.  2 = quadratic
         self.dsigclip  = 3.0    # Sigma clipping for derivative 
         self.sigclip   = 3.0    # Sigma clipping for simple clipping
-        self.boxwindow = 0.5    # Box size for simple clipping [days]
-        self.boxsigma  = 5.0    # Box size for simple clipping [days]
+        self.boxwindow = 2.0    # Box size for simple clipping [days]
+        self.boxsigma  = 3.0    # Box size for simple clipping [days]
         self.nsampmax  = 6      # Sample size for derivative routine
         self.detrended = 0      # Track if detrended data is used/created
         self.dataclip  = 0      # Track if clipped data is used/created 
