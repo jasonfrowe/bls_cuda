@@ -43,6 +43,7 @@ class gbls_inputs_class:
         self.minbin   = 5
         self.plots    = 1    # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1    # 0 = single thread, 1 = multiprocessing
+        self.normalize = "coverage_mad"  # Options: none, mad, percentile_mad, coverage_mad
 
 class gbls_ans_class:
     def __init__(self):
@@ -483,6 +484,10 @@ def running_std_with_filter(data, half_window):
     
     return running_std
         
+def nine_if_even(x):
+    """Ensure x is odd, increment by 1 if even."""
+    return x if (x % 2 == 1) else (x + 1)
+
 def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, min_width=5):
     """
     Estimate an approximately optimal median-filter kernel width (in bins)
@@ -499,9 +504,13 @@ def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, 
     aggregate over the search band to get a single odd kernel size.
     """
     try:
+        # Handle edge case: very small frequency arrays
+        if len(freqs) < 3:
+            return nine_if_even(min_width)
+        
         T = float(np.max(time) - np.min(time))
         if not np.isfinite(T) or T <= 0:
-            return max(3, min_width | 1)
+            return nine_if_even(min_width)
 
         # Duty cycle q(f) ~ (R*/a)/π ≈ const * f^(2/3)
         fsec = freqs / day2sec
@@ -511,7 +520,8 @@ def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, 
         w_f = q / T
 
         # Local grid spacing Δf (use gradient to handle non-uniform grids)
-        df = np.abs(np.gradient(freqs))
+        # Use edge_order=1 for robustness with small arrays
+        df = np.abs(np.gradient(freqs, edge_order=1))
         df[~np.isfinite(df)] = np.nan
         df[df == 0] = np.nan
 
@@ -519,7 +529,7 @@ def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, 
         bins = w_f / df
         bins = bins[np.isfinite(bins) & (bins > 0)]
         if bins.size == 0:
-            return max(3, min_width | 1)
+            return nine_if_even(min_width)
 
         median_bins = float(np.median(bins))
         # Scale by alpha to ensure the window is several peak-widths wide
@@ -536,32 +546,121 @@ def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, 
         return max(3, width)
     except Exception:
         # Fallback to a conservative small odd window on any error
-        return  nine_if_even(9)
+        return nine_if_even(9)
 
-def nine_if_even(x):
-    return x if (x % 2 == 1) else (x + 1)
+def _rolling_percentile(x, k, pct):
+    """Rolling percentile with constant window size k, shifted near edges."""
+    k = int(k)
+    if k < 3:
+        return x.copy()
+    if k % 2 == 0:
+        k += 1
+    half = k // 2
+    out = np.empty_like(x)
+    n = len(x)
+    for i in range(n):
+        start = max(0, min(i - half, n - k))
+        end = start + k
+        out[i] = np.percentile(x[start:end], pct)
+    return out
 
-def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar):
+def _rolling_median(x, k):
+    """Rolling median with constant window size k, shifted near edges."""
+    k = int(k)
+    if k < 3:
+        return x.copy()
+    if k % 2 == 0:
+        k += 1
+    half = k // 2
+    out = np.empty_like(x)
+    n = len(x)
+    for i in range(n):
+        start = max(0, min(i - half, n - k))
+        end = start + k
+        out[i] = np.median(x[start:end])
+    return out
+
+def _rolling_mad(residual, k):
+    """Rolling MAD around local median, constant window size k."""
+    k = int(k)
+    if k < 3:
+        return np.abs(residual - np.median(residual))
+    if k % 2 == 0:
+        k += 1
+    half = k // 2
+    out = np.empty_like(residual)
+    n = len(residual)
+    for i in range(n):
+        start = max(0, min(i - half, n - k))
+        end = start + k
+        seg = residual[start:end]
+        m = np.median(seg)
+        out[i] = np.median(np.abs(seg - m))
+    return out
+
+def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="coverage_mad"):
 
     periods = 1/freqs # periods (days)
 
     # Estimate a data-driven, duty-cycle informed median filter width.
     # Falls back to a small odd kernel if estimation fails.
-    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=8*ofac, min_width= nine_if_even(int(max(5, ofac*4))))
-    print(f"Using median filter width of {width} bins for BLS spectrum whitening.")
-
-    width_old = np.min((int(ofac*1000)+1,nstep)) # clean up the 1/f ramp from BLS
-    if width_old % 2 == 0:
-        width_old = width_old - 1
-    print(f"Comparing against old version {width_old} bins for 1/f noise removal.")
-
-    filtered = medfilt(np.sqrt(p), kernel_size=width)
-
-    data = np.sqrt(p) - filtered
+    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=8*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
     
-    half_window = width 
-    running_std = running_std_with_filter(data, half_window)
-    power = (np.sqrt(p) - filtered)/running_std # This is our BLS statistic array for each frequency/period
+    sqrtp = np.sqrt(p)
+    baseline = _rolling_median(sqrtp, width)
+    residual = sqrtp - baseline
+
+    eps = 1e-12
+    if normalize_mode == "none":
+        power = residual
+    elif normalize_mode == "mad":
+        # Rolling MAD around the baseline (constant window at edges)
+        local_med = _rolling_median(residual, width)
+        mad = _rolling_mad(residual - local_med, width)
+        noise = 1.4826 * mad
+        # Robust fallback: use global median for edge/low values
+        global_noise = np.nanmedian(noise[noise > eps])
+        if not np.isfinite(global_noise) or global_noise <= 0:
+            global_noise = np.nanstd(residual)
+        noise = np.maximum(noise, 0.1 * global_noise)  # floor at 10% of typical
+        power = residual / (noise + eps)
+    elif normalize_mode == "percentile_mad":
+        # Use upper-percentile baseline and MAD of residuals (constant window at edges)
+        perc_base = _rolling_percentile(sqrtp, width, 75)
+        resid2 = sqrtp - perc_base
+        local_med2 = _rolling_median(resid2, width)
+        mad2 = _rolling_mad(resid2 - local_med2, width)
+        noise2 = 1.4826 * mad2
+        # Robust fallback
+        global_noise2 = np.nanmedian(noise2[noise2 > eps])
+        if not np.isfinite(global_noise2) or global_noise2 <= 0:
+            global_noise2 = np.nanstd(resid2)
+        noise2 = np.maximum(noise2, 0.1 * global_noise2)
+        power = resid2 / (noise2 + eps)
+    else:  # "coverage_mad" (default)
+        # Coverage proxy via kkmi(f)
+        fsec = freqs / day2sec
+        q = pifac * Rstar * Rsun / (G * Mstar * Msun) ** (1.0 / 3.0) * fsec ** (2.0 / 3.0)
+        qmi = q / 2.0
+        tiny = onehour * freqs / 2.0
+        qmi = np.maximum(qmi, tiny)
+        kkmi = np.maximum(5, np.floor(npt * qmi)).astype(float)
+        coverage = np.clip(kkmi / float(npt), 0.01, 1.0)  # clip to [1%, 100%]
+        # Rolling MAD (constant window at edges)
+        local_med = _rolling_median(residual, width)
+        mad = _rolling_mad(residual - local_med, width)
+        noise = 1.4826 * mad
+        # Robust fallback
+        global_noise = np.nanmedian(noise[noise > eps])
+        if not np.isfinite(global_noise) or global_noise <= 0:
+            global_noise = np.nanstd(residual)
+        noise = np.maximum(noise, 0.1 * global_noise)
+        # Weighted normalization with floor
+        denom = noise * coverage + eps
+        power = residual / (denom + eps)
+
+    # Sanitize: replace NaN/Inf with very negative values so they don't dominate sort
+    power = np.where(np.isfinite(power), power, -1e30)
 
     psort = np.argsort(power) #Get sorted indicies to find best event
 
@@ -638,6 +737,16 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
         freq1 = 2.0/(maxt-mint)                   #lowest frequency [c/d]
     if freq2 <= 0:
         freq2 = 2.0                               #highest frequency [c/d]
+    
+    # Validate frequency range
+    if freq1 >= freq2:
+        raise ValueError(
+            f"Invalid frequency range: freq1={freq1:.6f} must be < freq2={freq2:.6f} c/d\n"
+            f"Remember: frequency = 1/period, so longer periods = lower frequencies.\n"
+            f"For period range [{1/freq2:.2f}, {1/freq1:.2f}] days, use:\n"
+            f"  freq1 = {1/(maxt-mint):.6f} c/d (period = {maxt-mint:.2f} days)\n"
+            f"  freq2 = {freq2:.6f} c/d (period = {1/freq2:.2f} days)"
+        )
 
     #Compute some quantities 
     steps = int(ofac * (freq2 - freq1) * npt/nyq) #naive number of frequencies to scan
@@ -646,7 +755,22 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
     #Calculate the number of steps needed to scan the frequency range 
     nstep = calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
     # print("freqs: ", freq1, freq2)
-    # print("nstep: ", nstep) 
+    # print("nstep: ", nstep)
+    
+    # Validate minimum nstep to ensure meaningful BLS search
+    if nstep < 3:
+        print(f"Warning: nstep={nstep} is too small for meaningful BLS search.")
+        print(f"Frequency range [{freq1:.6f}, {freq2:.6f}] c/d may be too narrow.")
+        print(f"Consider adjusting freq1, freq2, or ofac parameters.")
+        # Return a dummy result
+        gbls_ans = gbls_ans_class()
+        gbls_ans.epo = 0.0
+        gbls_ans.bper = 1.0 / freq1 if freq1 > 0 else 1.0
+        gbls_ans.bpower = 0.0
+        gbls_ans.snr = 0.0
+        gbls_ans.tdur = 0.1
+        gbls_ans.depth = 0.0
+        return gbls_ans
 
     #no need to break up runs
     nper = nstep
@@ -693,8 +817,9 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
         jn1 = jn1.T.ravel()[0:nstep]
         jn2 = jn2.T.ravel()[0:nstep]
     
+    normalize_mode = getattr(gbls_inputs, "normalize", "coverage_mad")
     periods, power, bper, epo, bpower, snr, tdur, depth = \
-        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar)
+        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode)
     if gbls_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
                 filename, gbls_inputs.plots)
@@ -733,6 +858,11 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
 
     ibi = np.zeros((nb2), dtype=np.int32)
     y   = np.zeros((nb2), dtype=np.float64)
+    
+    # Initialize return values to safe defaults
+    p = 0.0
+    jn1 = 0
+    jn2 = 0
 
     for i in range(npt):
 
@@ -771,8 +901,6 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
     if kkmi < 5: #minbin
         kkmi = 5
     nbkma = nb + kma
-
-    p = 0
 
     for i in range(nb):
         s = 0.0
