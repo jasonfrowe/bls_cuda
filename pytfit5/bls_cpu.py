@@ -483,74 +483,85 @@ def running_std_with_filter(data, half_window):
     
     return running_std
         
-def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime):
+def _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins, alpha=8, min_width=5):
+    """
+    Estimate an approximately optimal median-filter kernel width (in bins)
+    for whitening the BLS spectrum while preserving transit peaks.
+
+    Rationale:
+    - The characteristic frequency width of a transit peak is ~ q / T,
+      where q is the duty cycle and T is the total observing baseline.
+    - With a local grid spacing Δf, the peak spans about (q/T)/Δf bins.
+    - A robust background estimate should use a window several times wider
+      than the peak width; alpha≈6–10 works well in practice.
+
+    We use stellar-informed duty cycle q(f) computed as in bls_kernel and
+    aggregate over the search band to get a single odd kernel size.
+    """
+    try:
+        T = float(np.max(time) - np.min(time))
+        if not np.isfinite(T) or T <= 0:
+            return max(3, min_width | 1)
+
+        # Duty cycle q(f) ~ (R*/a)/π ≈ const * f^(2/3)
+        fsec = freqs / day2sec
+        q = pifac * Rstar * Rsun / (G * Mstar * Msun) ** (1.0 / 3.0) * fsec ** (2.0 / 3.0)
+
+        # Characteristic peak width in frequency units
+        w_f = q / T
+
+        # Local grid spacing Δf (use gradient to handle non-uniform grids)
+        df = np.abs(np.gradient(freqs))
+        df[~np.isfinite(df)] = np.nan
+        df[df == 0] = np.nan
+
+        # Peak width in bins
+        bins = w_f / df
+        bins = bins[np.isfinite(bins) & (bins > 0)]
+        if bins.size == 0:
+            return max(3, min_width | 1)
+
+        median_bins = float(np.median(bins))
+        # Scale by alpha to ensure the window is several peak-widths wide
+        width = int(np.ceil(alpha * median_bins))
+
+        # Enforce odd width and practical bounds
+        if width < min_width:
+            width = min_width
+        if width % 2 == 0:
+            width += 1
+        if width > max_width_bins:
+            # keep within available samples and odd
+            width = max_width_bins if (max_width_bins % 2 == 1) else max_width_bins - 1
+        return max(3, width)
+    except Exception:
+        # Fallback to a conservative small odd window on any error
+        return  nine_if_even(9)
+
+def nine_if_even(x):
+    return x if (x % 2 == 1) else (x + 1)
+
+def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar):
 
     periods = 1/freqs # periods (days)
 
-    width = np.min((int(ofac*1000)+1,nstep)) # clean up the 1/f ramp from BLS
-    if width % 2 == 0:
-        width = width - 1
-    
-    # params, covariance = curve_fit(one_over_f, freqs, np.sqrt(p))
-    # alpha_fit, scale_fit = params
-    # filtered = one_over_f(freqs, alpha_fit, scale_fit)
-    
-    filtered = medfilt(np.sqrt(p), kernel_size=width) 
+    # Estimate a data-driven, duty-cycle informed median filter width.
+    # Falls back to a small odd kernel if estimation fails.
+    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=8*ofac, min_width= nine_if_even(int(max(5, ofac*4))))
+    print(f"Using median filter width of {width} bins for BLS spectrum whitening.")
+
+    width_old = np.min((int(ofac*1000)+1,nstep)) # clean up the 1/f ramp from BLS
+    if width_old % 2 == 0:
+        width_old = width_old - 1
+    print(f"Comparing against old version {width_old} bins for 1/f noise removal.")
+
+    filtered = medfilt(np.sqrt(p), kernel_size=width)
 
     data = np.sqrt(p) - filtered
     
     half_window = width 
     running_std = running_std_with_filter(data, half_window)
     power = (np.sqrt(p) - filtered)/running_std # This is our BLS statistic array for each frequency/period
-    
-    # # Define the number of logarithmic bins
-    # num_log_bins = 50 # Should be an input parameter
-    
-    # # Create logarithmically spaced bin edges
-    # log_min = np.log10(freqs.min())
-    # log_max = np.log10(freqs.max())
-    # log_bins = np.logspace(log_min, log_max, num_log_bins)
-
-    # # Calculate the standard deviation in each bin. [1, 2]
-    # binned_std, bin_edges, _ = stats.binned_statistic(
-    #     freqs,
-    #     data,
-    #     statistic=std_without_outliers,
-    #     bins=log_bins
-    # )
-
-    # # for test in zip(log_bins, binned_std):
-    # #     print(1/test[0], test[1])
-
-    # # Calculate the central frequency of each bin
-    # bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    # # interpolated_std = interpolate_std(binned_std, bin_centers, freqs)
-    # # power = data / interpolated_std
-    
-    # # # It's possible some bins are empty and result in NaN. We should replace NaNs
-    # # # with a reasonable value, like the mean of the other std values, or interpolate.
-    # # # A simple approach is to forward-fill and then back-fill NaNs.
-    # # valid_bins = ~np.isnan(binned_std)
-    # # std_params, _ = curve_fit(
-    # #     one_over_f, 
-    # #     bin_centers[valid_bins], 
-    # #     binned_std[valid_bins]
-    # # )
-    # # beta_fit, C_fit = std_params # beta and C are the parameters for the scatter model
-
-    # # # Step 3c: Generate the smooth model for the scatter across all original frequencies
-    # # fitted_std = one_over_f(freqs, beta_fit, C_fit)
-
-    # # valid_std_mask = (fitted_std > 0)
-    # # power = np.zeros_like(p)
-    # # power[valid_std_mask] = \
-    # #     (np.sqrt(p[valid_std_mask]) - fitted_noise[valid_std_mask]) / fitted_std[valid_std_mask]
-
-    # std_fit = np.polyfit(bin_centers, binned_std, 3)
-    # std_model = np.poly1d(std_fit)
-
-    # power = data / std_model(freqs)
 
     psort = np.argsort(power) #Get sorted indicies to find best event
 
@@ -587,9 +598,6 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         tdur = bper * (in2 - in1) / nb
     else:
         tdur = bper * (in2 + nb - 1 - in1) / nb
-
-    # s = np.sqrt( p[psort[-1]] * jn2[psort[-1]] * (npt - jn2[psort[-1]]) )
-    # depth = -s * npt / ( jn2[psort[-1]] * (npt - jn2[psort[-1]]) )
 
     #Dirty translation of Fortran from transitfind5
     fmean, std, depth, snr = bls_stats(epo, bper, tdur, npt, time + mintime - Keptime, flux) 
@@ -663,15 +671,6 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
         p   = np.zeros((max_processes, ndiv))
         jn1 = np.zeros((max_processes, ndiv), dtype=np.int32)
         jn2 = np.zeros((max_processes, ndiv), dtype=np.int32)
-    
-        # iarg = np.zeros((max_processes - 1, 2), dtype = np.int32)
-        # npro = 0
-        # for i in range(0, nstep, ndiv):
-        #     i1 = i
-        #     i2 = np.min((nstep,i+ndiv))
-        #     iarg[npro, 0] = i1
-        #     iarg[npro, 1] = i2
-        #     npro += 1
 
         iarg = np.zeros((max_processes, ndiv), dtype = np.int32)
         for i in range(0, max_processes):
@@ -695,7 +694,7 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
         jn2 = jn2.T.ravel()[0:nstep]
     
     periods, power, bper, epo, bpower, snr, tdur, depth = \
-        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime)
+        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar)
     if gbls_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
                 filename, gbls_inputs.plots)

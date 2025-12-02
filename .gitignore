@@ -6,6 +6,7 @@ ttv_test.ipynb
 utils/
 depreciated/
 3288.01.h5
+.vscode/
 
 # Mac stuff
 .DS_Store
