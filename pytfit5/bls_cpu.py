@@ -670,6 +670,123 @@ def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
     
     return baseline, mask
 
+def _extrapolate_baseline(baseline, freqs, time, width):
+    """
+    Extrapolate baseline for low frequencies where rolling median is unreliable.
+    
+    At low frequencies (long periods), the rolling window cannot properly estimate
+    the baseline because there aren't enough frequency bins. This extrapolates the
+    baseline trend from the well-sampled region to low frequencies.
+    
+    Parameters:
+    - baseline: current baseline estimate from rolling median
+    - freqs: frequency array (cycles/day)
+    - time: time array (days)
+    - width: rolling window width used for baseline
+    
+    Returns:
+    - baseline_extrap: baseline with extrapolation applied to low frequencies
+    """
+    n = len(freqs)
+    T_baseline = np.max(time) - np.min(time)
+    
+    # The rolling window becomes unreliable when there are fewer than ~width
+    # frequency bins covering the characteristic period scale.
+    # For a period P, the characteristic frequency width is ~1/T.
+    # We need at least width * df bins, where df is the local frequency spacing.
+    
+    # Estimate where we have insufficient resolution:
+    # - Low-freq region: periods > 0.3 * T_baseline (conservative threshold)
+    # - Well-sampled region: periods < 0.15 * T_baseline for fitting
+    low_freq_thresh = 1.0 / (0.3 * T_baseline)
+    fit_freq_thresh = 1.0 / (0.15 * T_baseline)
+    
+    low_freq_mask = freqs < low_freq_thresh
+    fit_freq_mask = freqs > fit_freq_thresh
+    
+    if not np.any(low_freq_mask) or not np.any(fit_freq_mask):
+        # No extrapolation needed
+        return baseline
+    
+    # Fit baseline vs log(frequency) in well-sampled region
+    fit_idx = np.where(fit_freq_mask)[0]
+    if len(fit_idx) < 5:
+        # Not enough points for reliable fit
+        return baseline
+    
+    log_freq_fit = np.log10(freqs[fit_idx])
+    base_fit = baseline[fit_idx]
+    
+    # Linear extrapolation in log-freq space: baseline = a + b * log10(freq)
+    try:
+        p_base = np.polyfit(log_freq_fit, base_fit, 1)
+        
+        # Apply extrapolation only to low-frequency region
+        extrap_idx = np.where(low_freq_mask)[0]
+        if len(extrap_idx) == 0:
+            return baseline
+            
+        log_freq_extrap = np.log10(freqs[extrap_idx])
+        
+        baseline_extrap = baseline.copy()
+        baseline_extrap[extrap_idx] = np.polyval(p_base, log_freq_extrap)
+        
+        return baseline_extrap
+    except:
+        # Fallback if fit fails
+        return baseline
+
+def _extrapolate_noise(noise, freqs, time, width):
+    """
+    Extrapolate noise estimates for low frequencies.
+    
+    Parameters:
+    - noise: current noise estimate
+    - freqs: frequency array (cycles/day)  
+    - time: time array (days)
+    - width: rolling window width used for noise estimation
+    
+    Returns:
+    - noise_extrap: noise with extrapolation applied to low frequencies
+    """
+    n = len(freqs)
+    T_baseline = np.max(time) - np.min(time)
+    
+    low_freq_thresh = 1.0 / (0.3 * T_baseline)
+    fit_freq_thresh = 1.0 / (0.15 * T_baseline)
+    
+    low_freq_mask = freqs < low_freq_thresh
+    fit_freq_mask = freqs > fit_freq_thresh
+    
+    if not np.any(low_freq_mask) or not np.any(fit_freq_mask):
+        return noise
+    
+    fit_idx = np.where(fit_freq_mask)[0]
+    if len(fit_idx) < 5:
+        return noise
+    
+    log_freq_fit = np.log10(freqs[fit_idx])
+    noise_fit = noise[fit_idx]
+    
+    try:
+        p_noise = np.polyfit(log_freq_fit, noise_fit, 1)
+        
+        extrap_idx = np.where(low_freq_mask)[0]
+        if len(extrap_idx) == 0:
+            return noise
+            
+        log_freq_extrap = np.log10(freqs[extrap_idx])
+        
+        noise_extrap = noise.copy()
+        noise_extrap[extrap_idx] = np.polyval(p_noise, log_freq_extrap)
+        
+        # Ensure positive noise
+        noise_extrap = np.maximum(noise_extrap, 1e-12)
+        
+        return noise_extrap
+    except:
+        return noise
+
 
 def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="coverage_mad"):
 
@@ -681,6 +798,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     
     sqrtp = np.sqrt(p)
     baseline = _rolling_median(sqrtp, width)
+    # Extrapolate baseline for low frequencies BEFORE computing residuals
+    baseline = _extrapolate_baseline(baseline, freqs, time, width)
     residual = sqrtp - baseline
 
     eps = 1e-12
@@ -690,6 +809,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         # Iteratively identify continuum by clipping strong peaks
         # This is more robust for high-SNR signals that would bias standard methods
         iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+        # Extrapolate the iterative baseline for low frequencies
+        iter_baseline = _extrapolate_baseline(iter_baseline, freqs, time, width)
         residual_iter = sqrtp - iter_baseline
         # Compute noise from non-peak regions only
         if np.sum(peak_mask) > 10:
@@ -700,7 +821,10 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
             noise_iter = np.nanstd(residual_iter)
         if not np.isfinite(noise_iter) or noise_iter <= 0:
             noise_iter = np.nanstd(residual_iter)
-        power = residual_iter / (noise_iter + eps)
+        # Create noise array and extrapolate for low frequencies
+        noise_arr = np.full_like(residual_iter, noise_iter)
+        noise_arr = _extrapolate_noise(noise_arr, freqs, time, width)
+        power = residual_iter / (noise_arr + eps)
     elif normalize_mode == "mad":
         # Rolling MAD around the baseline (constant window at edges)
         local_med = _rolling_median(residual, width)
@@ -711,10 +835,14 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         if not np.isfinite(global_noise) or global_noise <= 0:
             global_noise = np.nanstd(residual)
         noise = np.maximum(noise, 0.1 * global_noise)  # floor at 10% of typical
+        # Extrapolate noise for low frequencies
+        noise = _extrapolate_noise(noise, freqs, time, width)
         power = residual / (noise + eps)
     elif normalize_mode == "percentile_mad":
         # Use upper-percentile baseline and MAD of residuals (constant window at edges)
         perc_base = _rolling_percentile(sqrtp, width, 75)
+        # Extrapolate percentile baseline for low frequencies
+        perc_base = _extrapolate_baseline(perc_base, freqs, time, width)
         resid2 = sqrtp - perc_base
         local_med2 = _rolling_median(resid2, width)
         mad2 = _rolling_mad(resid2 - local_med2, width)
@@ -724,6 +852,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         if not np.isfinite(global_noise2) or global_noise2 <= 0:
             global_noise2 = np.nanstd(resid2)
         noise2 = np.maximum(noise2, 0.1 * global_noise2)
+        # Extrapolate noise for low frequencies
+        noise2 = _extrapolate_noise(noise2, freqs, time, width)
         power = resid2 / (noise2 + eps)
     else:  # "coverage_mad" (default)
         # Coverage proxy via kkmi(f)
@@ -735,6 +865,7 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         kkmi = np.maximum(5, np.floor(npt * qmi)).astype(float)
         coverage = np.clip(kkmi / float(npt), 0.01, 1.0)  # clip to [1%, 100%]
         # Rolling MAD (constant window at edges)
+        # Note: baseline already extrapolated before residual calculation
         local_med = _rolling_median(residual, width)
         mad = _rolling_mad(residual - local_med, width)
         noise = 1.4826 * mad
@@ -743,6 +874,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         if not np.isfinite(global_noise) or global_noise <= 0:
             global_noise = np.nanstd(residual)
         noise = np.maximum(noise, 0.1 * global_noise)
+        # Extrapolate noise for low frequencies
+        noise = _extrapolate_noise(noise, freqs, time, width)
         # Weighted normalization with floor
         denom = noise * coverage + eps
         power = residual / (denom + eps)
