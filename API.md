@@ -12,7 +12,7 @@ This document provides detailed API documentation for the `pytfit5` package, cov
 2. [Package Structure](#package-structure)
 3. [BLS Module (`pytfit5.gbls`)](#bls-module-pytfit5gbls)
 4. [Transit Model Module (`pytfit5.transitmodel`)](#transit-model-module-pytfit5transitmodel)
-5. [Synthetic Lightcurves (`utils_python.synthetic`)](#synthetic-lightcurves-utils_pythonsynthetic)
+5. [Synthetic Lightcurves (`pytfit5.synthetic`)](#synthetic-lightcurves-pytfit5synthetic)
 6. [Keplerian Utilities (`pytfit5.kep`)](#keplerian-utilities-pytfit5kep)
 7. [MCMC Module (`pytfit5.tmcmc`)](#mcmc-module-pytfit5tmcmc)
 8. [Examples](#examples)
@@ -52,6 +52,7 @@ pytfit5.tmcmc  # MCMC transit fitting
 pytfit5.transitmodel  # Transit light curve modeling
 pytfit5.occult        # Occultation modeling
 pytfit5.effects       # Astrophysical effects (beaming, ellipsoidal, etc.)
+pytfit5.synthetic     # Synthetic lightcurve generation
 ```
 
 ---
@@ -224,8 +225,8 @@ Read two-column light curve files (time, flux).
 
 For long-period signals (approaching dataset length), the BLS normalization uses extrapolation to prevent suppression:
 
-1. **Threshold Detection**: Identifies low-frequency bins where periods > 0.3 × T_baseline
-2. **Linear Fit**: Fits baseline and noise vs. log(frequency) in well-sampled region (periods < 0.15 × T_baseline)
+1. **Threshold Detection**: Identifies low-frequency bins where periods > 0.5 × T_baseline (need at least 2 full periods)
+2. **Linear Fit**: Fits baseline and noise vs. log(frequency) in well-sampled region (periods < 0.25 × T_baseline)
 3. **Extrapolation**: Applies fitted trend to low-frequency region
 
 This ensures long-period transits maintain proper SNR in the normalized periodogram.
@@ -308,7 +309,7 @@ model = tm.transitModel(sol, time, itime, nintg=41)
 
 ---
 
-## Synthetic Lightcurves (`utils_python.synthetic`)
+## Synthetic Lightcurves (`pytfit5.synthetic`)
 
 Utilities for generating synthetic transit lightcurves for BLS testing and validation.
 
@@ -342,7 +343,7 @@ where $\sigma$ is the noise level, computed to achieve the requested SNR.
 **Example:**
 
 ```python
-from utils_python.synthetic import generate_synthetic_lightcurve
+from pytfit5.synthetic import generate_synthetic_lightcurve
 
 # Generate 60-day lightcurve with 20-day period, SNR=10
 time, flux = generate_synthetic_lightcurve(
@@ -449,7 +450,7 @@ print(f"Depth: {ans.depth*1e6:.1f} ppm")
 ### Example 2: High-SNR Synthetic Test
 
 ```python
-from utils_python.synthetic import generate_synthetic_lightcurve
+from pytfit5.synthetic import generate_synthetic_lightcurve
 import pytfit5.gbls as gbls
 import matplotlib.pyplot as plt
 
@@ -492,7 +493,7 @@ plt.show()
 ### Example 3: Long-Period Search with Extrapolation
 
 ```python
-from utils_python.synthetic import generate_synthetic_lightcurve
+from pytfit5.synthetic import generate_synthetic_lightcurve
 import pytfit5.gbls as gbls
 
 # Generate long-period transit in short baseline
@@ -505,7 +506,7 @@ time, flux = generate_synthetic_lightcurve(
     seed=99
 )
 
-# BLS will extrapolate baseline for periods > 0.3*60 = 18 days
+# BLS will extrapolate baseline for periods > 0.5*60 = 30 days
 inputs = gbls.gbls_inputs_class()
 inputs.freq1 = 1.0/60.0
 inputs.freq2 = 1.0

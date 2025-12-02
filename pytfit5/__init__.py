@@ -6,3 +6,4 @@ from . import transitfit
 from . import transitplot
 from . import transitmcmc
 from . import mcmcroutines
+from . import synthetic
