@@ -696,10 +696,10 @@ def _extrapolate_baseline(baseline, freqs, time, width):
     # We need at least width * df bins, where df is the local frequency spacing.
     
     # Estimate where we have insufficient resolution:
-    # - Low-freq region: periods > 0.3 * T_baseline (conservative threshold)
-    # - Well-sampled region: periods < 0.15 * T_baseline for fitting
-    low_freq_thresh = 1.0 / (0.3 * T_baseline)
-    fit_freq_thresh = 1.0 / (0.15 * T_baseline)
+    # - Low-freq region: periods > 0.5 * T_baseline (need at least 2 full periods)
+    # - Well-sampled region: periods < 0.25 * T_baseline for fitting
+    low_freq_thresh = 1.0 / (0.5 * T_baseline)
+    fit_freq_thresh = 1.0 / (0.25 * T_baseline)
     
     low_freq_mask = freqs < low_freq_thresh
     fit_freq_mask = freqs > fit_freq_thresh
@@ -752,8 +752,8 @@ def _extrapolate_noise(noise, freqs, time, width):
     n = len(freqs)
     T_baseline = np.max(time) - np.min(time)
     
-    low_freq_thresh = 1.0 / (0.3 * T_baseline)
-    fit_freq_thresh = 1.0 / (0.15 * T_baseline)
+    low_freq_thresh = 1.0 / (0.5 * T_baseline)
+    fit_freq_thresh = 1.0 / (0.25 * T_baseline)
     
     low_freq_mask = freqs < low_freq_thresh
     fit_freq_mask = freqs > fit_freq_thresh
