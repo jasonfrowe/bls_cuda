@@ -43,7 +43,7 @@ class gbls_inputs_class:
         self.minbin   = 5
         self.plots    = 1    # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1    # 0 = single thread, 1 = multiprocessing
-        self.normalize = "coverage_mad"  # Options: none, mad, percentile_mad, coverage_mad
+        self.normalize = "coverage_mad"  # Options: none, mad, percentile_mad, coverage_mad, iterative_baseline
 
 class gbls_ans_class:
     def __init__(self):
@@ -581,22 +581,95 @@ def _rolling_median(x, k):
     return out
 
 def _rolling_mad(residual, k):
-    """Rolling MAD around local median, constant window size k."""
-    k = int(k)
-    if k < 3:
-        return np.abs(residual - np.median(residual))
-    if k % 2 == 0:
-        k += 1
-    half = k // 2
-    out = np.empty_like(residual)
+    """Compute rolling MAD (median absolute deviation) with constant window width k."""
     n = len(residual)
+    if k > n:
+        k = n
+    half = k // 2
+    mad = np.zeros(n)
     for i in range(n):
         start = max(0, min(i - half, n - k))
         end = start + k
-        seg = residual[start:end]
-        m = np.median(seg)
-        out[i] = np.median(np.abs(seg - m))
-    return out
+        window = residual[start:end]
+        med = np.median(window)
+        mad[i] = np.median(np.abs(window - med))
+    return mad
+
+def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
+    """
+    Estimate the continuum baseline using iterative sigma-clipping.
+    
+    This method is robust to strong positive outliers (transit peaks) by:
+    1. Computing a rolling median baseline
+    2. Identifying points significantly above the baseline (peaks)
+    3. Excluding peaks and re-computing the baseline
+    4. Iterating until convergence
+    
+    Parameters:
+    - sqrtp: sqrt(BLS power) spectrum
+    - width: rolling window width
+    - sigma_thresh: threshold for clipping peaks (default 3.0)
+    - max_iter: maximum iterations (default 3)
+    
+    Returns:
+    - baseline: robust estimate of underlying continuum
+    - mask: boolean mask of non-peak points used for final baseline
+    """
+    n = len(sqrtp)
+    mask = np.ones(n, dtype=bool)  # Start with all points
+    
+    for iteration in range(max_iter):
+        # Compute baseline using only non-masked points
+        masked_sqrtp = sqrtp.copy()
+        masked_sqrtp[~mask] = np.nan
+        
+        # Rolling median ignoring masked points
+        baseline = np.zeros(n)
+        half = width // 2
+        for i in range(n):
+            start = max(0, min(i - half, n - width))
+            end = start + width
+            window = masked_sqrtp[start:end]
+            valid = window[np.isfinite(window)]
+            if len(valid) > 0:
+                baseline[i] = np.median(valid)
+            else:
+                baseline[i] = np.nan
+        
+        # Fill any NaN baselines with global median of valid points
+        valid_baseline = baseline[np.isfinite(baseline)]
+        if len(valid_baseline) > 0:
+            baseline[~np.isfinite(baseline)] = np.median(valid_baseline)
+        else:
+            baseline[:] = np.nanmedian(sqrtp)
+        
+        # Compute residuals and noise estimate
+        residual = sqrtp - baseline
+        
+        # Robust noise estimate using only current non-masked points
+        valid_resid = residual[mask]
+        if len(valid_resid) > 3:
+            # Use MAD for robust noise estimate
+            mad = np.median(np.abs(valid_resid - np.median(valid_resid)))
+            noise = 1.4826 * mad
+        else:
+            noise = np.nanstd(residual)
+        
+        if noise <= 0 or not np.isfinite(noise):
+            noise = 1.0
+        
+        # Update mask: exclude points significantly above baseline
+        # (peaks are positive residuals > sigma_thresh * noise)
+        new_mask = residual < (sigma_thresh * noise)
+        
+        # Check for convergence
+        if np.array_equal(new_mask, mask):
+            break
+        
+        mask = new_mask
+    
+    return baseline, mask
+
 
 def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="coverage_mad"):
 
@@ -613,6 +686,21 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     eps = 1e-12
     if normalize_mode == "none":
         power = residual
+    elif normalize_mode == "iterative_baseline":
+        # Iteratively identify continuum by clipping strong peaks
+        # This is more robust for high-SNR signals that would bias standard methods
+        iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+        residual_iter = sqrtp - iter_baseline
+        # Compute noise from non-peak regions only
+        if np.sum(peak_mask) > 10:
+            noise_resid = residual_iter[peak_mask]
+            mad_iter = np.median(np.abs(noise_resid - np.median(noise_resid)))
+            noise_iter = 1.4826 * mad_iter
+        else:
+            noise_iter = np.nanstd(residual_iter)
+        if not np.isfinite(noise_iter) or noise_iter <= 0:
+            noise_iter = np.nanstd(residual_iter)
+        power = residual_iter / (noise_iter + eps)
     elif normalize_mode == "mad":
         # Rolling MAD around the baseline (constant window at edges)
         local_med = _rolling_median(residual, width)
