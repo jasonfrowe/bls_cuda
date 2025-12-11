@@ -346,7 +346,8 @@ where $\sigma$ is the noise level, computed to achieve the requested SNR.
 from pytfit5.synthetic import generate_synthetic_lightcurve
 
 # Generate 60-day lightcurve with 20-day period, SNR=10
-time, flux = generate_synthetic_lightcurve(
+# Generate synthetic data
+time, flux, sol_injected = generate_synthetic_lightcurve(
     t0=5.0,
     per=20.05,
     time_length=60.0,
@@ -365,6 +366,121 @@ inputs.freq2 = 2.0
 inputs.normalize = "iterative_baseline"
 
 ans, freqs, power = gbls.bls(time, flux, inputs)
+```
+
+---
+
+#### `compare_bls_injection(time, sol_injected, sol_bls, verbose=True)`
+
+Compare BLS detection results with injection parameters and calculate recovery statistics.
+
+**Parameters:**
+
+- `time` (np.ndarray): Array of observation times (days)
+- `sol_injected` (transit_model_class): Solution object with injected transit parameters
+- `sol_bls` (transit_model_class): Solution object with BLS recovered parameters
+- `verbose` (bool): Print comparison results (default: True)
+
+**Returns:**
+
+- `result` (dict): Recovery statistics containing:
+  - `overlap_fraction`: Fraction of true in-transit points recovered (0-1)
+  - `precision`: Fraction of recovered points that are truly in-transit (0-1)
+  - `true_positive`: Number of correctly identified in-transit points
+  - `false_positive`: Number of incorrectly identified in-transit points
+  - `false_negative`: Number of missed in-transit points
+  - `period_factor`: Best matching period factor (1 = exact, 2 = 2× alias, etc.)
+  - `period_factor_type`: 'exact', 'multiple', 'fraction', or 'mismatch'
+  - `is_recovered`: Boolean indicating successful recovery (overlap > 50% and precision > 50%)
+
+**Features:**
+
+- Automatically tests for period aliases (integer multiples and fractions up to 5×)
+- Handles phase-shifted detections
+- Calculates overlap between true and recovered transit windows
+- Provides detailed recovery statistics
+
+**Example:**
+
+```python
+from pytfit5.synthetic import generate_synthetic_lightcurve, compare_bls_injection
+import pytfit5.gbls as gbls
+import pytfit5.transitmodel as transitm
+
+# Generate synthetic data (returns solution object)
+time, flux, sol_injected = generate_synthetic_lightcurve(
+    t0=5.0, per=10.5, time_length=60.0, depth=0.01, snr=15.0, seed=42
+)
+
+# Run BLS
+inputs = gbls.gbls_inputs_class()
+inputs.freq1 = 0.05
+inputs.freq2 = 2.0
+inputs.normalize = "iterative_baseline"
+ans = gbls.bls(inputs, time, flux)
+
+# Create solution object from BLS results
+sol_bls = transitm.transit_model_class()
+sol_bls.npl = 1
+sol_bls.t0 = [ans.epo]
+sol_bls.per = [ans.bper]
+sol_bls.bb = [0.5]  # Assumed impact parameter
+sol_bls.rdr = [np.sqrt(ans.depth)]
+sol_bls.rho = 1.4  # Assumed stellar density (g/cm³)
+
+# Compare results using solution objects
+recovery = compare_bls_injection(
+    time=time,
+    sol_injected=sol_injected,
+    sol_bls=sol_bls,
+    verbose=True
+)
+
+print(f"Recovery success: {recovery['is_recovered']}")
+print(f"Overlap: {recovery['overlap_fraction']:.1%}")
+```
+
+---
+
+#### `calculate_transit_overlap(time, true_t0, true_per, true_duration, recovered_t0, recovered_per, recovered_duration, max_period_factor=5)`
+
+Lower-level function to calculate overlap between true and recovered transit windows.
+
+**Parameters:**
+
+- `time` (np.ndarray): Observation times
+- `true_t0`, `true_per`, `true_duration` (float): Injected transit parameters
+- `recovered_t0`, `recovered_per`, `recovered_duration` (float): BLS results
+- `max_period_factor` (int): Maximum integer factor for period aliases (default: 5)
+
+**Returns:**
+
+- `result` (dict): Same statistics as `compare_bls_injection` but without verbose output
+
+---
+
+#### `mark_in_transit(time, t0, per, duration)`
+
+Mark which observations fall within transit windows.
+
+**Parameters:**
+
+- `time` (np.ndarray): Observation times (days)
+- `t0` (float): Transit center time (days)
+- `per` (float): Orbital period (days)
+- `duration` (float): Transit duration (days)
+
+**Returns:**
+
+- `in_transit` (np.ndarray): Boolean array marking in-transit observations
+
+**Example:**
+
+```python
+from pytfit5.synthetic import mark_in_transit
+
+in_transit = mark_in_transit(time, t0=5.0, per=10.5, duration=0.1)
+print(f"In-transit points: {np.sum(in_transit)}")
 ```
 
 ---

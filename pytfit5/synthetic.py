@@ -15,7 +15,7 @@ def generate_synthetic_lightcurve(
     snr: float,
     cadence: float = 1.0/48.0,
     seed: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, transitm.transit_model_class]:
     """
     Generate a synthetic lightcurve using PyTFit5 transit model for BLS testing.
 
@@ -38,6 +38,7 @@ def generate_synthetic_lightcurve(
     Returns
     - time: Array of observation times (days)
     - flux: Synthetic flux array with noise, baseline ~1
+    - sol: Transit model solution object with injection parameters
     """
     if seed is not None:
         rng = np.random.default_rng(seed)
@@ -56,7 +57,8 @@ def generate_synthetic_lightcurve(
     # Limb darkening defaults (TESS-like)
     sol.nl3 = 0.311
     sol.nl4 = 0.270
-    sol.rho = kep.rhostar(per, 0.1)  # rough placeholder based on period and dummy duration
+    # Use solar density (1.4 g/cm^3) as default
+    sol.rho = 1.4
     sol.zpt = 0.0
     sol.dil = 0.0
     sol.vof = 0.0
@@ -113,4 +115,246 @@ def generate_synthetic_lightcurve(
     noise = rng.normal(0.0, sigma, size=time.shape[0])
 
     flux = f_model + noise
-    return time, flux
+    return time, flux, sol
+
+
+def mark_in_transit(time: np.ndarray, t0: float, per: float, duration: float) -> np.ndarray:
+    """
+    Mark which observations are in transit.
+    
+    Parameters
+    ----------
+    time : np.ndarray
+        Array of observation times (days)
+    t0 : float
+        Transit center time (days)
+    per : float
+        Orbital period (days)
+    duration : float
+        Transit duration (days)
+    
+    Returns
+    -------
+    in_transit : np.ndarray (bool)
+        Boolean array marking in-transit observations
+    """
+    # Calculate phase for each observation
+    phase = ((time - t0) % per) / per
+    
+    # Center phase around transit (phase = 0 at transit center)
+    # Handle wrap-around: phases > 0.5 are actually negative phases
+    phase = np.where(phase > 0.5, phase - 1.0, phase)
+    
+    # Convert phase to time from transit center
+    dt_from_transit = phase * per
+    
+    # Mark observations within half-duration of transit center
+    in_transit = np.abs(dt_from_transit) <= (duration / 2.0)
+    
+    return in_transit
+
+
+def calculate_transit_overlap(
+    time: np.ndarray,
+    true_t0: float,
+    true_per: float,
+    true_duration: float,
+    recovered_t0: float,
+    recovered_per: float,
+    recovered_duration: float,
+    max_period_factor: int = 5
+) -> dict:
+    """
+    Calculate overlap between true and recovered transit windows.
+    
+    This function handles period aliases by testing if the recovered period
+    is an integer multiple or fraction of the true period.
+    
+    Parameters
+    ----------
+    time : np.ndarray
+        Array of observation times (days)
+    true_t0 : float
+        Injected transit center time (days)
+    true_per : float
+        Injected period (days)
+    true_duration : float
+        Injected transit duration (days)
+    recovered_t0 : float
+        BLS detected transit center time (days)
+    recovered_per : float
+        BLS detected period (days)
+    recovered_duration : float
+        BLS detected transit duration (days)
+    max_period_factor : int, optional
+        Maximum integer factor to test for period aliases (default: 5)
+    
+    Returns
+    -------
+    result : dict
+        Dictionary containing:
+        - 'overlap_fraction': Fraction of true in-transit points recovered (0 to 1)
+        - 'precision': Fraction of recovered points that are truly in-transit (0 to 1)
+        - 'true_positive': Number of correctly identified in-transit points
+        - 'false_positive': Number of incorrectly identified in-transit points
+        - 'false_negative': Number of missed in-transit points
+        - 'period_factor': Best matching period factor (1 = exact match, 2 = 2x alias, etc.)
+        - 'period_factor_type': 'exact', 'multiple', or 'fraction'
+        - 'is_recovered': Boolean indicating if transit was successfully recovered
+    """
+    # Mark true in-transit observations
+    true_in_transit = mark_in_transit(time, true_t0, true_per, true_duration)
+    n_true = np.sum(true_in_transit)
+    
+    if n_true == 0:
+        # No true transits in dataset
+        return {
+            'overlap_fraction': 0.0,
+            'precision': 0.0,
+            'true_positive': 0,
+            'false_positive': 0,
+            'false_negative': 0,
+            'period_factor': 0,
+            'period_factor_type': 'none',
+            'is_recovered': False
+        }
+    
+    # Test different period factors to find best match
+    best_overlap = 0.0
+    best_factor = 1
+    best_factor_type = 'exact'
+    best_recovered_mask = None
+    
+    # Test if recovered period is a multiple of true period
+    for factor in range(1, max_period_factor + 1):
+        test_per = true_per * factor
+        if np.abs(recovered_per - test_per) / test_per < 0.05:  # Within 5%
+            recovered_in_transit = mark_in_transit(time, recovered_t0, recovered_per, recovered_duration)
+            overlap = np.sum(true_in_transit & recovered_in_transit) / n_true
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_factor = factor
+                best_factor_type = 'multiple' if factor > 1 else 'exact'
+                best_recovered_mask = recovered_in_transit
+    
+    # Test if recovered period is a fraction of true period
+    for factor in range(2, max_period_factor + 1):
+        test_per = true_per / factor
+        if np.abs(recovered_per - test_per) / test_per < 0.05:  # Within 5%
+            recovered_in_transit = mark_in_transit(time, recovered_t0, recovered_per, recovered_duration)
+            overlap = np.sum(true_in_transit & recovered_in_transit) / n_true
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_factor = factor
+                best_factor_type = 'fraction'
+                best_recovered_mask = recovered_in_transit
+    
+    # If no good match found, still calculate overlap using recovered parameters
+    # This handles cases where period is very close but not exactly matching any factor
+    if best_recovered_mask is None:
+        # For close period matches (within 10%), use the recovered parameters
+        period_ratio = recovered_per / true_per
+        if 0.9 < period_ratio < 1.1:
+            # Periods are very close, calculate overlap directly
+            recovered_in_transit = mark_in_transit(time, recovered_t0, recovered_per, recovered_duration)
+            best_overlap = np.sum(true_in_transit & recovered_in_transit) / n_true
+            best_recovered_mask = recovered_in_transit
+            best_factor = 1
+            best_factor_type = 'exact' if 0.99 < period_ratio < 1.01 else 'close'
+        else:
+            # Period significantly different, still calculate but mark as mismatch
+            recovered_in_transit = mark_in_transit(time, recovered_t0, recovered_per, recovered_duration)
+            best_overlap = np.sum(true_in_transit & recovered_in_transit) / n_true
+            best_recovered_mask = recovered_in_transit
+            best_factor_type = 'mismatch'
+    
+    # Calculate statistics
+    true_positive = np.sum(true_in_transit & best_recovered_mask)
+    false_positive = np.sum(~true_in_transit & best_recovered_mask)
+    false_negative = np.sum(true_in_transit & ~best_recovered_mask)
+    n_recovered = np.sum(best_recovered_mask)
+    
+    overlap_fraction = true_positive / n_true if n_true > 0 else 0.0
+    precision = true_positive / n_recovered if n_recovered > 0 else 0.0
+    
+    # Consider transit recovered if overlap > 50% and precision > 50%
+    is_recovered = (overlap_fraction > 0.5) and (precision > 0.5)
+    
+    return {
+        'overlap_fraction': overlap_fraction,
+        'precision': precision,
+        'true_positive': int(true_positive),
+        'false_positive': int(false_positive),
+        'false_negative': int(false_negative),
+        'period_factor': best_factor,
+        'period_factor_type': best_factor_type,
+        'is_recovered': is_recovered
+    }
+
+
+def compare_bls_injection(
+    time: np.ndarray,
+    sol_injected: transitm.transit_model_class,
+    sol_bls: transitm.transit_model_class,
+    verbose: bool = True
+) -> dict:
+    """
+    Compare BLS detection results with injection parameters.
+    
+    Convenience wrapper around calculate_transit_overlap with nice output formatting.
+    
+    Parameters
+    ----------
+    time : np.ndarray
+        Array of observation times (days)
+    sol_injected : transit_model_class
+        Solution object with injected transit parameters
+    sol_bls : transit_model_class
+        Solution object with BLS recovered parameters
+    verbose : bool, optional
+        Print comparison results (default: True)
+    
+    Returns
+    -------
+    result : dict
+        Recovery statistics (see calculate_transit_overlap)
+    """
+    # Extract parameters from solution objects
+    injected_t0 = sol_injected.t0[0]
+    injected_per = sol_injected.per[0]
+    injected_duration = kep.transitDuration(sol_injected, i_planet=0)
+    
+    bls_t0 = sol_bls.t0[0]
+    bls_per = sol_bls.per[0]
+    bls_duration = kep.transitDuration(sol_bls, i_planet=0)
+    
+    result = calculate_transit_overlap(
+        time, injected_t0, injected_per, injected_duration,
+        bls_t0, bls_per, bls_duration
+    )
+    
+    if verbose:
+        print("=" * 60)
+        print("BLS Recovery Analysis")
+        print("=" * 60)
+        print(f"Injected Period:    {injected_per:.6f} days")
+        print(f"BLS Period:         {bls_per:.6f} days")
+        print(f"Period Ratio:       {bls_per/injected_per:.4f}")
+        print(f"Period Factor Type: {result['period_factor_type']}")
+        if result['period_factor'] > 1:
+            print(f"Period Factor:      {result['period_factor']}")
+        print()
+        print(f"Injected T0:        {injected_t0:.6f} days")
+        print(f"BLS T0:             {bls_t0:.6f} days")
+        print(f"T0 Difference:      {abs(bls_t0 - injected_t0):.6f} days")
+        print()
+        print(f"Overlap Fraction:   {result['overlap_fraction']:.2%}")
+        print(f"Precision:          {result['precision']:.2%}")
+        print(f"True Positives:     {result['true_positive']}")
+        print(f"False Positives:    {result['false_positive']}")
+        print(f"False Negatives:    {result['false_negative']}")
+        print()
+        print(f"Recovery Status:    {'✓ RECOVERED' if result['is_recovered'] else '✗ NOT RECOVERED'}")
+        print("=" * 60)
+    
+    return result
