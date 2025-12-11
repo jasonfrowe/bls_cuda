@@ -679,9 +679,9 @@ def _extrapolate_baseline(baseline, freqs, time, width):
     """
     Baseline correction for long periods (> 1.5 * baseline).
     
-    For periods longer than 1.5x the data baseline, combine all spectrum
-    in that range into one bin and use the 25th percentile as the correction.
-    This avoids artifacts from fitting or blending approaches.
+    For periods longer than 1.5x the data baseline, extrapolate baseline
+    using statistics from shorter, well-sampled periods to avoid suppressing
+    long-period signals.
     
     Parameters:
     - baseline: current baseline estimate from rolling median
@@ -690,46 +690,54 @@ def _extrapolate_baseline(baseline, freqs, time, width):
     - width: rolling window width (not used, kept for compatibility)
     
     Returns:
-    - baseline_corrected: baseline with uniform correction at long periods
+    - baseline_corrected: baseline with extrapolated values at long periods
     """
     T_baseline = np.max(time) - np.min(time)
     
-    # Threshold: periods > 1.5 * baseline need correction
-    # More conservative to avoid affecting real long-period signals
+    # Threshold: periods > 1.5 * baseline need extrapolation
     # In frequency space: freqs < 1/(1.5*baseline) = 0.667/baseline
     freq_thresh = 0.667 / T_baseline
     
     long_period_mask = freqs < freq_thresh
     
     if not np.any(long_period_mask):
-        # No long periods to correct
+        # No long periods to extrapolate
         return baseline
     
-    # Get long-period baseline values, excluding near-zero or invalid values
-    long_period_values = baseline[long_period_mask]
-    valid_mask = (long_period_values > 1e-10) & np.isfinite(long_period_values)
+    # Get SHORT period baseline values (well-sampled region)
+    # Use region from 1.5x to 0.5x baseline period for statistics
+    freq_short_min = freq_thresh  # 1.5x baseline
+    freq_short_max = 2.0 / T_baseline  # 0.5x baseline
+    short_period_mask = (freqs >= freq_short_min) & (freqs <= freq_short_max)
+    
+    if not np.any(short_period_mask):
+        # Fallback: use all non-long-period data
+        short_period_mask = ~long_period_mask
+    
+    # Calculate median baseline from SHORT periods
+    short_period_values = baseline[short_period_mask]
+    valid_mask = (short_period_values > 1e-10) & np.isfinite(short_period_values)
     
     if not np.any(valid_mask):
         # No valid values, return unchanged
         return baseline
     
-    # Use lower percentile to avoid being biased by strong peaks
-    # The 25th percentile is more robust than median for excluding peaks
-    long_period_baseline = np.percentile(long_period_values[valid_mask], 25)
+    # Use median of short-period baseline as extrapolated value
+    extrapolated_baseline = np.median(short_period_values[valid_mask])
     
-    # Apply uniform correction to long-period region
+    # Apply extrapolated baseline to long-period region
     baseline_corrected = baseline.copy()
-    baseline_corrected[long_period_mask] = long_period_baseline
+    baseline_corrected[long_period_mask] = extrapolated_baseline
     
     return baseline_corrected
 
 def _extrapolate_noise(noise, freqs, time, width):
     """
-    Noise floor correction for long periods (> 1.5 * baseline).
+    Noise correction for long periods (> 1.5 * baseline).
     
-    For periods longer than 1.5x the data baseline, combine all spectrum
-    in that range into one bin and use the 25th percentile as the correction.
-    This avoids artifacts from fitting or blending approaches.
+    For periods longer than 1.5x the data baseline, extrapolate noise
+    using statistics from shorter, well-sampled periods to avoid suppressing
+    long-period signals.
     
     Parameters:
     - noise: current noise estimate from rolling median
@@ -738,36 +746,44 @@ def _extrapolate_noise(noise, freqs, time, width):
     - width: rolling window width (not used, kept for compatibility)
     
     Returns:
-    - noise_corrected: noise with uniform correction at long periods
+    - noise_corrected: noise with extrapolated values at long periods
     """
     T_baseline = np.max(time) - np.min(time)
     
-    # Threshold: periods > 1.5 * baseline need correction
-    # More conservative to avoid affecting real long-period signals
+    # Threshold: periods > 1.5 * baseline need extrapolation
     # In frequency space: freqs < 1/(1.5*baseline) = 0.667/baseline
     freq_thresh = 0.667 / T_baseline
     
     long_period_mask = freqs < freq_thresh
     
     if not np.any(long_period_mask):
-        # No long periods to correct
+        # No long periods to extrapolate
         return noise
     
-    # Get long-period noise values, excluding near-zero or invalid values
-    long_period_values = noise[long_period_mask]
-    valid_mask = (long_period_values > 1e-10) & np.isfinite(long_period_values)
+    # Get SHORT period noise values (well-sampled region)
+    # Use region from 1.5x to 0.5x baseline period for statistics
+    freq_short_min = freq_thresh  # 1.5x baseline
+    freq_short_max = 2.0 / T_baseline  # 0.5x baseline
+    short_period_mask = (freqs >= freq_short_min) & (freqs <= freq_short_max)
+    
+    if not np.any(short_period_mask):
+        # Fallback: use all non-long-period data
+        short_period_mask = ~long_period_mask
+    
+    # Calculate median noise from SHORT periods
+    short_period_values = noise[short_period_mask]
+    valid_mask = (short_period_values > 1e-10) & np.isfinite(short_period_values)
     
     if not np.any(valid_mask):
         # No valid values, return unchanged
         return noise
     
-    # Use lower percentile to avoid being biased by low-noise regions at peaks
-    # The 25th percentile is more robust than median
-    long_period_noise = np.percentile(long_period_values[valid_mask], 25)
+    # Use median of short-period noise as extrapolated value
+    extrapolated_noise = np.median(short_period_values[valid_mask])
     
-    # Apply uniform correction to long-period region
+    # Apply extrapolated noise to long-period region
     noise_corrected = noise.copy()
-    noise_corrected[long_period_mask] = long_period_noise
+    noise_corrected[long_period_mask] = extrapolated_noise
     
     return noise_corrected
 
