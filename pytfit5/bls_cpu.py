@@ -43,7 +43,8 @@ class gbls_inputs_class:
         self.minbin   = 5
         self.plots    = 1    # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1    # 0 = single thread, 1 = multiprocessing
-        self.normalize = "coverage_mad"  # Options: none, mad, percentile_mad, coverage_mad, iterative_baseline
+        self.normalize = "iterative_baseline"  # Options: none, mad, percentile_mad, coverage_mad, iterative_baseline
+        self.return_spectrum = False  # If True, return full BLS spectrum (periods, power, freqs)
 
 class gbls_ans_class:
     def __init__(self):
@@ -53,6 +54,9 @@ class gbls_ans_class:
         self.snr      = -1
         self.tdur     = 8.0
         self.depth    = 1.0
+        self.periods  = None  # Full period array (if return_spectrum=True)
+        self.power    = None  # Full power array (if return_spectrum=True)
+        self.freqs    = None  # Full frequency array (if return_spectrum=True)
 
 #generic routine to read in files
 def readfile(filename):
@@ -672,120 +676,21 @@ def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
 
 def _extrapolate_baseline(baseline, freqs, time, width):
     """
-    Extrapolate baseline for low frequencies where rolling median is unreliable.
+    Baseline extrapolation - DISABLED.
     
-    At low frequencies (long periods), the rolling window cannot properly estimate
-    the baseline because there aren't enough frequency bins. This extrapolates the
-    baseline trend from the well-sampled region to low frequencies.
-    
-    Parameters:
-    - baseline: current baseline estimate from rolling median
-    - freqs: frequency array (cycles/day)
-    - time: time array (days)
-    - width: rolling window width used for baseline
-    
-    Returns:
-    - baseline_extrap: baseline with extrapolation applied to low frequencies
+    Extrapolation was causing noise floor issues at long periods.
+    Returns baseline unchanged.
     """
-    n = len(freqs)
-    T_baseline = np.max(time) - np.min(time)
-    
-    # The rolling window becomes unreliable when there are fewer than ~width
-    # frequency bins covering the characteristic period scale.
-    # For a period P, the characteristic frequency width is ~1/T.
-    # We need at least width * df bins, where df is the local frequency spacing.
-    
-    # Estimate where we have insufficient resolution:
-    # - Low-freq region: periods > 0.5 * T_baseline (need at least 2 full periods)
-    # - Well-sampled region: periods < 0.25 * T_baseline for fitting
-    low_freq_thresh = 1.0 / (0.5 * T_baseline)
-    fit_freq_thresh = 1.0 / (0.25 * T_baseline)
-    
-    low_freq_mask = freqs < low_freq_thresh
-    fit_freq_mask = freqs > fit_freq_thresh
-    
-    if not np.any(low_freq_mask) or not np.any(fit_freq_mask):
-        # No extrapolation needed
-        return baseline
-    
-    # Fit baseline vs log(frequency) in well-sampled region
-    fit_idx = np.where(fit_freq_mask)[0]
-    if len(fit_idx) < 5:
-        # Not enough points for reliable fit
-        return baseline
-    
-    log_freq_fit = np.log10(freqs[fit_idx])
-    base_fit = baseline[fit_idx]
-    
-    # Linear extrapolation in log-freq space: baseline = a + b * log10(freq)
-    try:
-        p_base = np.polyfit(log_freq_fit, base_fit, 1)
-        
-        # Apply extrapolation only to low-frequency region
-        extrap_idx = np.where(low_freq_mask)[0]
-        if len(extrap_idx) == 0:
-            return baseline
-            
-        log_freq_extrap = np.log10(freqs[extrap_idx])
-        
-        baseline_extrap = baseline.copy()
-        baseline_extrap[extrap_idx] = np.polyval(p_base, log_freq_extrap)
-        
-        return baseline_extrap
-    except:
-        # Fallback if fit fails
-        return baseline
+    return baseline
 
 def _extrapolate_noise(noise, freqs, time, width):
     """
-    Extrapolate noise estimates for low frequencies.
+    Noise floor extrapolation - DISABLED.
     
-    Parameters:
-    - noise: current noise estimate
-    - freqs: frequency array (cycles/day)  
-    - time: time array (days)
-    - width: rolling window width used for noise estimation
-    
-    Returns:
-    - noise_extrap: noise with extrapolation applied to low frequencies
+    Extrapolation was causing noise floor issues at long periods.
+    Returns noise unchanged.
     """
-    n = len(freqs)
-    T_baseline = np.max(time) - np.min(time)
-    
-    low_freq_thresh = 1.0 / (0.5 * T_baseline)
-    fit_freq_thresh = 1.0 / (0.25 * T_baseline)
-    
-    low_freq_mask = freqs < low_freq_thresh
-    fit_freq_mask = freqs > fit_freq_thresh
-    
-    if not np.any(low_freq_mask) or not np.any(fit_freq_mask):
-        return noise
-    
-    fit_idx = np.where(fit_freq_mask)[0]
-    if len(fit_idx) < 5:
-        return noise
-    
-    log_freq_fit = np.log10(freqs[fit_idx])
-    noise_fit = noise[fit_idx]
-    
-    try:
-        p_noise = np.polyfit(log_freq_fit, noise_fit, 1)
-        
-        extrap_idx = np.where(low_freq_mask)[0]
-        if len(extrap_idx) == 0:
-            return noise
-            
-        log_freq_extrap = np.log10(freqs[extrap_idx])
-        
-        noise_extrap = noise.copy()
-        noise_extrap[extrap_idx] = np.polyval(p_noise, log_freq_extrap)
-        
-        # Ensure positive noise
-        noise_extrap = np.maximum(noise_extrap, 1e-12)
-        
-        return noise_extrap
-    except:
-        return noise
+    return noise
 
 
 def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="coverage_mad"):
@@ -1052,6 +957,12 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
+    
+    # Optionally store full spectrum
+    if gbls_inputs.return_spectrum:
+        gbls_ans.periods = periods
+        gbls_ans.power = power
+        gbls_ans.freqs = freqs
 
     return gbls_ans
 

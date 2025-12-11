@@ -83,7 +83,8 @@ Configuration class for BLS search parameters.
 | `minbin` | int | `5` | Minimum bins in transit |
 | `plots` | int | `1` | Plot mode: 0=none, 1=X11, 2=PNG+X11, 3=PNG |
 | `multipro` | int | `1` | Enable multiprocessing (0=off, 1=on) |
-| `normalize` | str | `"coverage_mad"` | Normalization mode (see below) |
+| `normalize` | str | `"iterative_baseline"` | Normalization mode (see below) |
+| `return_spectrum` | bool | `False` | If True, return full BLS spectrum in result |
 
 **Normalization Modes:**
 
@@ -91,7 +92,15 @@ Configuration class for BLS search parameters.
 - `"mad"` - Median Absolute Deviation normalization
 - `"percentile_mad"` - 75th percentile baseline with MAD noise
 - `"coverage_mad"` - MAD weighted by frequency bin coverage
-- `"iterative_baseline"` - **Recommended for high-SNR signals** - Uses sigma-clipping to robustly identify continuum, preventing strong peaks from biasing normalization
+- `"iterative_baseline"` - **Default and recommended** - Uses sigma-clipping to robustly identify continuum, preventing strong peaks from biasing normalization. Best for most applications.
+
+**Long-Period Extrapolation:**
+
+For periods longer than 0.5× the observation baseline, BLS cannot reliably measure the baseline and noise floor due to insufficient frequency resolution. The code automatically:
+1. Measures median baseline and noise in well-sampled region (periods < 0.25× baseline)
+2. Extends with flat (constant) values for long periods (> 0.5× baseline)
+3. Uses smooth cosine-tapered blending in transition region (0.35-0.5× baseline)
+4. Assumes noise floor is flat at long periods for conservative, unbiased detection
 
 **Example:**
 
@@ -124,6 +133,9 @@ Results class storing BLS detection information.
 | `snr` | float | Signal-to-noise ratio |
 | `tdur` | float | Transit duration (hours) |
 | `depth` | float | Transit depth (fractional) |
+| `periods` | np.ndarray | Full period array (if `return_spectrum=True`) |
+| `power` | np.ndarray | Full power array (if `return_spectrum=True`) |
+| `freqs` | np.ndarray | Full frequency array (if `return_spectrum=True`) |
 
 ---
 
