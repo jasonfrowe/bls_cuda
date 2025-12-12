@@ -568,6 +568,7 @@ class tpy5_inputs_class:
         self.iter_max_iters      = 5    # Maximum iterations for iterative detrending
         self.iter_sigma_threshold = 3.0  # Sigma threshold for transit detection
         self.iter_min_duration    = 0.05 # Minimum transit duration in days (~1 hour)
+        self.iter_verbose        = False  # Print iteration progress and statistics
         # BLS parameters (consolidated from gbls_inputs_class)
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
@@ -581,7 +582,9 @@ class tpy5_inputs_class:
         self.multipro = 1               # 0 = single thread, 1 = multiprocessing
         self.normalize = "iterative_baseline"  # BLS normalization: none, mad, percentile_mad, coverage_mad, iterative_baseline
         self.return_spectrum = False    # If True, return full BLS spectrum (periods, power, freqs)
-        self.oneoverf_correction = True # If True, apply 1/f correction for periods > baseline/2 
+        self.oneoverf_correction = True # If True, apply baseline subtraction (else leave raw)
+        self.oneoverf_extrapolate = True # If True, extrapolate baseline/noise for periods > threshold
+        self.oneoverf_threshold = None   # Period threshold for extrapolation (days). None = use baseline length 
 
 class exocat_class:
     def __init__(self):
@@ -1129,7 +1132,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     phot : phot_class
         Photometry object with time, flux, ferr, tflag
     tpy5_inputs : tpy5_inputs_class
-        Input parameters (boxbin, nfitp, gapsize, iter_max_iters, iter_sigma_threshold, iter_min_duration)
+        Input parameters (boxbin, nfitp, gapsize, iter_max_iters, iter_sigma_threshold, 
+        iter_min_duration, iter_verbose)
         
     Returns
     -------
@@ -1140,6 +1144,7 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     max_iters = tpy5_inputs.iter_max_iters
     sigma_threshold = tpy5_inputs.iter_sigma_threshold
     min_duration = tpy5_inputs.iter_min_duration
+    verbose = tpy5_inputs.iter_verbose
     
     # Initialize tflag if not already set
     if not hasattr(phot, 'tflag') or phot.tflag is None or len(phot.tflag) == 0:
@@ -1148,10 +1153,11 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     # Store original tflag to preserve user-specified transit masks
     tflag_original = np.copy(phot.tflag)
     
-    print(f"Starting iterative detrending (max {max_iters} iterations)")
-    print(f"  Sigma threshold: {sigma_threshold:.1f}")
-    print(f"  Min duration: {min_duration*24:.1f} hours")
-    print(f"  Initially masked points: {np.sum(tflag_original)}")
+    if verbose:
+        print(f"Starting iterative detrending (max {max_iters} iterations)")
+        print(f"  Sigma threshold: {sigma_threshold:.1f}")
+        print(f"  Min duration: {min_duration*24:.1f} hours")
+        print(f"  Initially masked points: {np.sum(tflag_original)}")
     
     for iteration in range(max_iters):
         # Run detrending with current mask
@@ -1164,7 +1170,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
         # Calculate local noise level (use only non-masked points)
         unmasked = (phot.tflag == 0)
         if np.sum(unmasked) < 10:
-            print(f"  Iteration {iteration+1}: Too few unmasked points, stopping")
+            if verbose:
+                print(f"  Iteration {iteration+1}: Too few unmasked points, stopping")
             break
             
         sigma = np.std(residuals[unmasked])
@@ -1174,7 +1181,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
         is_negative_outlier = (residuals < -sigma_threshold * sigma) & unmasked
         
         if np.sum(is_negative_outlier) == 0:
-            print(f"  Iteration {iteration+1}: No new transit-like features detected, converged")
+            if verbose:
+                print(f"  Iteration {iteration+1}: No new transit-like features detected, converged")
             break
         
         # Group consecutive outlier points to identify transit events
@@ -1224,13 +1232,15 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
         new_masked = np.sum(transit_mask & ~phot.tflag.astype(bool))
         
         if new_masked == 0:
-            print(f"  Iteration {iteration+1}: No new transit events with sufficient duration, converged")
+            if verbose:
+                print(f"  Iteration {iteration+1}: No new transit events with sufficient duration, converged")
             break
         
         # Update tflag with newly detected transits
         phot.tflag = (phot.tflag.astype(bool) | transit_mask).astype(int)
         
-        print(f"  Iteration {iteration+1}: Masked {new_masked} new points (total masked: {np.sum(phot.tflag)})")
+        if verbose:
+            print(f"  Iteration {iteration+1}: Masked {new_masked} new points (total masked: {np.sum(phot.tflag)})")
     
     # Final detrending pass with complete mask
     phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag, 
@@ -1238,9 +1248,10 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     
     tpy5_inputs.detrended = 1
     
-    print(f"Iterative detrending complete")
-    print(f"  Final masked points: {np.sum(phot.tflag)} (original: {np.sum(tflag_original)})")
-    print(f"  Newly detected transit points: {np.sum(phot.tflag) - np.sum(tflag_original)}")
+    if verbose:
+        print(f"Iterative detrending complete")
+        print(f"  Final masked points: {np.sum(phot.tflag)} (original: {np.sum(tflag_original)})")
+        print(f"  Newly detected transit points: {np.sum(phot.tflag) - np.sum(tflag_original)}")
 
 
 def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):

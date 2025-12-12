@@ -257,7 +257,7 @@ def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, sn
             axn = ax1
             
         elif i == 1:
-            # 2nd panel : Time series
+            # 2nd panel : Time series with transit markers
             xlabel = "Time (days)"
             ylabel = "Relative Flux"
         
@@ -280,6 +280,21 @@ def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, sn
             psize = 1
 
             axn = ax2
+            
+            # Calculate and mark predicted transit times
+            t_data = time + mintime - Keptime
+            t_min = np.min(t_data)
+            t_max = np.max(t_data)
+            
+            # Find all transit times within the data range
+            n_transit_start = int(np.floor((t_min - epo) / bper))
+            n_transit_end = int(np.ceil((t_max - epo) / bper))
+            
+            transit_times = []
+            for n in range(n_transit_start, n_transit_end + 1):
+                t_transit = epo + n * bper
+                if t_min <= t_transit <= t_max:
+                    transit_times.append(t_transit)
 
         elif i == 2:
             # 3rd panel : phase plot 
@@ -387,6 +402,11 @@ def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, sn
             axn.scatter(x, y, s = psize, color = 'black')
         else:
             axn.plot(x, y, color = 'black')
+        
+        # Add vertical lines for transit times on time series panel
+        if i == 1 and len(transit_times) > 0:
+            for t_transit in transit_times:
+                axn.axvline(x=t_transit, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
     
     fig.tight_layout()
     if plots == 2:        
@@ -663,28 +683,33 @@ def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
     
     return baseline, mask
 
-def _extrapolate_baseline(baseline, freqs, time, width):
+def _extrapolate_baseline(baseline, freqs, time, width, threshold=None):
     """
-    Baseline correction for long periods (> 1.5 * baseline).
+    Baseline extrapolation for long periods beyond the data baseline.
     
-    For periods longer than 1.5x the data baseline, extrapolate baseline
-    using statistics from shorter, well-sampled periods to avoid suppressing
-    long-period signals.
+    For periods longer than the threshold (default: baseline length), 
+    extrapolate baseline using statistics from the last 1/3 of the baseline 
+    (well-sampled region) to avoid suppressing long-period signals.
     
     Parameters:
     - baseline: current baseline estimate from rolling median
     - freqs: frequency array (cycles/day)
     - time: time array (days)
     - width: rolling window width (not used, kept for compatibility)
+    - threshold: period threshold in days. If None, uses baseline length.
     
     Returns:
     - baseline_corrected: baseline with extrapolated values at long periods
     """
     T_baseline = np.max(time) - np.min(time)
     
-    # Threshold: periods > 1.5 * baseline need extrapolation
-    # In frequency space: freqs < 1/(1.5*baseline) = 0.667/baseline
-    freq_thresh = 0.667 / T_baseline
+    # Use provided threshold or default to baseline length
+    if threshold is None:
+        threshold = T_baseline
+    
+    # Threshold: periods > threshold need extrapolation
+    # In frequency space: freqs < 1/threshold
+    freq_thresh = 1.0 / threshold
     
     long_period_mask = freqs < freq_thresh
     
@@ -692,26 +717,27 @@ def _extrapolate_baseline(baseline, freqs, time, width):
         # No long periods to extrapolate
         return baseline
     
-    # Get SHORT period baseline values (well-sampled region)
-    # Use region from 1.5x to 0.5x baseline period for statistics
-    freq_short_min = freq_thresh  # 1.5x baseline
-    freq_short_max = 2.0 / T_baseline  # 0.5x baseline
-    short_period_mask = (freqs >= freq_short_min) & (freqs <= freq_short_max)
+    # Reference region: last 1/3 of baseline
+    # For 60-day baseline: use 40-60 days (periods in that range)
+    # In frequency space: 1/60 to 1/40 c/d
+    freq_ref_min = 1.0 / T_baseline  # longest well-sampled period
+    freq_ref_max = 1.0 / (T_baseline * 2.0/3.0)  # 2/3 of baseline
+    reference_mask = (freqs >= freq_ref_min) & (freqs <= freq_ref_max)
     
-    if not np.any(short_period_mask):
+    if not np.any(reference_mask):
         # Fallback: use all non-long-period data
-        short_period_mask = ~long_period_mask
+        reference_mask = ~long_period_mask
     
-    # Calculate median baseline from SHORT periods
-    short_period_values = baseline[short_period_mask]
-    valid_mask = (short_period_values > 1e-10) & np.isfinite(short_period_values)
+    # Calculate median baseline from reference region
+    reference_values = baseline[reference_mask]
+    valid_mask = (reference_values > 1e-10) & np.isfinite(reference_values)
     
     if not np.any(valid_mask):
         # No valid values, return unchanged
         return baseline
     
-    # Use median of short-period baseline as extrapolated value
-    extrapolated_baseline = np.median(short_period_values[valid_mask])
+    # Use median of reference region as extrapolated value
+    extrapolated_baseline = np.median(reference_values[valid_mask])
     
     # Apply extrapolated baseline to long-period region
     baseline_corrected = baseline.copy()
@@ -719,28 +745,33 @@ def _extrapolate_baseline(baseline, freqs, time, width):
     
     return baseline_corrected
 
-def _extrapolate_noise(noise, freqs, time, width):
+def _extrapolate_noise(noise, freqs, time, width, threshold=None):
     """
-    Noise correction for long periods (> 1.5 * baseline).
+    Noise extrapolation for long periods beyond the data baseline.
     
-    For periods longer than 1.5x the data baseline, extrapolate noise
-    using statistics from shorter, well-sampled periods to avoid suppressing
-    long-period signals.
+    For periods longer than the threshold (default: baseline length), 
+    extrapolate noise using statistics from the last 1/3 of the baseline 
+    (well-sampled region) to avoid suppressing long-period signals.
     
     Parameters:
     - noise: current noise estimate from rolling median
     - freqs: frequency array (cycles/day)
     - time: time array (days)
     - width: rolling window width (not used, kept for compatibility)
+    - threshold: period threshold in days. If None, uses baseline length.
     
     Returns:
     - noise_corrected: noise with extrapolated values at long periods
     """
     T_baseline = np.max(time) - np.min(time)
     
-    # Threshold: periods > 1.5 * baseline need extrapolation
-    # In frequency space: freqs < 1/(1.5*baseline) = 0.667/baseline
-    freq_thresh = 0.667 / T_baseline
+    # Use provided threshold or default to baseline length
+    if threshold is None:
+        threshold = T_baseline
+    
+    # Threshold: periods > threshold need extrapolation
+    # In frequency space: freqs < 1/threshold
+    freq_thresh = 1.0 / threshold
     
     long_period_mask = freqs < freq_thresh
     
@@ -748,26 +779,27 @@ def _extrapolate_noise(noise, freqs, time, width):
         # No long periods to extrapolate
         return noise
     
-    # Get SHORT period noise values (well-sampled region)
-    # Use region from 1.5x to 0.5x baseline period for statistics
-    freq_short_min = freq_thresh  # 1.5x baseline
-    freq_short_max = 2.0 / T_baseline  # 0.5x baseline
-    short_period_mask = (freqs >= freq_short_min) & (freqs <= freq_short_max)
+    # Reference region: last 1/3 of baseline
+    # For 60-day baseline: use 40-60 days (periods in that range)
+    # In frequency space: 1/60 to 1/40 c/d
+    freq_ref_min = 1.0 / T_baseline  # longest well-sampled period
+    freq_ref_max = 1.0 / (T_baseline * 2.0/3.0)  # 2/3 of baseline
+    reference_mask = (freqs >= freq_ref_min) & (freqs <= freq_ref_max)
     
-    if not np.any(short_period_mask):
+    if not np.any(reference_mask):
         # Fallback: use all non-long-period data
-        short_period_mask = ~long_period_mask
+        reference_mask = ~long_period_mask
     
-    # Calculate median noise from SHORT periods
-    short_period_values = noise[short_period_mask]
-    valid_mask = (short_period_values > 1e-10) & np.isfinite(short_period_values)
+    # Calculate median noise from reference region
+    reference_values = noise[reference_mask]
+    valid_mask = (reference_values > 1e-10) & np.isfinite(reference_values)
     
     if not np.any(valid_mask):
         # No valid values, return unchanged
         return noise
     
-    # Use median of short-period noise as extrapolated value
-    extrapolated_noise = np.median(short_period_values[valid_mask])
+    # Use median of reference region as extrapolated value
+    extrapolated_noise = np.median(reference_values[valid_mask])
     
     # Apply extrapolated noise to long-period region
     noise_corrected = noise.copy()
@@ -776,13 +808,13 @@ def _extrapolate_noise(noise, freqs, time, width):
     return noise_corrected
 
 
-def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="iterative_baseline", oneoverf_correction=True):
+def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode="iterative_baseline", oneoverf_correction=False, oneoverf_extrapolate=True, oneoverf_threshold=None):
 
     periods = 1/freqs # periods (days)
 
     # Estimate a data-driven, duty-cycle informed median filter width.
     # Falls back to a small odd kernel if estimation fails.
-    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=8*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
+    width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=4*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
     
     sqrtp = np.sqrt(p)
     
@@ -793,22 +825,31 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
         # Pure BLS spectrum with no baseline correction or normalization
         power = sqrtp
     # For all other cases, we need to compute baseline and/or normalization
-    elif normalize_mode == "none":
+    elif normalize_mode == "none" and oneoverf_correction:
         # Baseline correction but no normalization
         # Use iterative baseline to avoid suppressing strong peaks
         baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
-        if oneoverf_correction:
-            baseline = _extrapolate_baseline(baseline, freqs, time, width)
+        # Apply extrapolation if enabled
+        if oneoverf_extrapolate:
+            baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
         residual = sqrtp - baseline
         power = residual
     elif normalize_mode == "iterative_baseline":
         # Iteratively identify continuum by clipping strong peaks
         # This is more robust for high-SNR signals that would bias standard methods
-        iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
-        # Extrapolate the iterative baseline for low frequencies (if enabled)
         if oneoverf_correction:
-            iter_baseline = _extrapolate_baseline(iter_baseline, freqs, time, width)
-        residual_iter = sqrtp - iter_baseline
+            # Apply baseline subtraction
+            iter_baseline, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+            # Extrapolate the iterative baseline for low frequencies (if enabled)
+            if oneoverf_extrapolate:
+                iter_baseline = _extrapolate_baseline(iter_baseline, freqs, time, width, threshold=oneoverf_threshold)
+            residual_iter = sqrtp - iter_baseline
+        else:
+            # No baseline subtraction, use raw sqrtp
+            residual_iter = sqrtp
+            # Still compute peak_mask for noise estimation
+            _, peak_mask = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+        
         # Compute noise from non-peak regions only
         if np.sum(peak_mask) > 10:
             noise_resid = residual_iter[peak_mask]
@@ -818,17 +859,18 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
             noise_iter = np.nanstd(residual_iter)
         if not np.isfinite(noise_iter) or noise_iter <= 0:
             noise_iter = np.nanstd(residual_iter)
-        # Create noise array and extrapolate for low frequencies (if enabled)
+        # Create uniform noise array (no extrapolation needed - already global constant)
         noise_arr = np.full_like(residual_iter, noise_iter)
-        if oneoverf_correction:
-            noise_arr = _extrapolate_noise(noise_arr, freqs, time, width)
         power = residual_iter / (noise_arr + eps)
     elif normalize_mode == "mad":
         # Compute baseline for MAD normalization using iterative method
-        baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
         if oneoverf_correction:
-            baseline = _extrapolate_baseline(baseline, freqs, time, width)
-        residual = sqrtp - baseline
+            baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+            if oneoverf_extrapolate:
+                baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
+            residual = sqrtp - baseline
+        else:
+            residual = sqrtp
         # Rolling MAD around the baseline (constant window at edges)
         local_med = _rolling_median(residual, width)
         mad = _rolling_mad(residual - local_med, width)
@@ -839,16 +881,19 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
             global_noise = np.nanstd(residual)
         noise = np.maximum(noise, 0.1 * global_noise)  # floor at 10% of typical
         # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_correction:
-            noise = _extrapolate_noise(noise, freqs, time, width)
+        if oneoverf_extrapolate:
+            noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
         power = residual / (noise + eps)
     elif normalize_mode == "percentile_mad":
         # Use upper-percentile baseline and MAD of residuals (constant window at edges)
-        perc_base = _rolling_percentile(sqrtp, width, 75)
-        # Extrapolate percentile baseline for low frequencies (if enabled)
         if oneoverf_correction:
-            perc_base = _extrapolate_baseline(perc_base, freqs, time, width)
-        resid2 = sqrtp - perc_base
+            perc_base = _rolling_percentile(sqrtp, width, 75)
+            # Extrapolate percentile baseline for low frequencies (if enabled)
+            if oneoverf_extrapolate:
+                perc_base = _extrapolate_baseline(perc_base, freqs, time, width, threshold=oneoverf_threshold)
+            resid2 = sqrtp - perc_base
+        else:
+            resid2 = sqrtp
         local_med2 = _rolling_median(resid2, width)
         mad2 = _rolling_mad(resid2 - local_med2, width)
         noise2 = 1.4826 * mad2
@@ -858,15 +903,18 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
             global_noise2 = np.nanstd(resid2)
         noise2 = np.maximum(noise2, 0.1 * global_noise2)
         # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_correction:
-            noise2 = _extrapolate_noise(noise2, freqs, time, width)
+        if oneoverf_extrapolate:
+            noise2 = _extrapolate_noise(noise2, freqs, time, width, threshold=oneoverf_threshold)
         power = resid2 / (noise2 + eps)
     else:  # "coverage_mad" (default)
         # Compute baseline for coverage_mad normalization using iterative method
-        baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
         if oneoverf_correction:
-            baseline = _extrapolate_baseline(baseline, freqs, time, width)
-        residual = sqrtp - baseline
+            baseline, _ = _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3)
+            if oneoverf_extrapolate:
+                baseline = _extrapolate_baseline(baseline, freqs, time, width, threshold=oneoverf_threshold)
+            residual = sqrtp - baseline
+        else:
+            residual = sqrtp
         # Coverage proxy via kkmi(f)
         fsec = freqs / day2sec
         q = pifac * Rstar * Rsun / (G * Mstar * Msun) ** (1.0 / 3.0) * fsec ** (2.0 / 3.0)
@@ -885,8 +933,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
             global_noise = np.nanstd(residual)
         noise = np.maximum(noise, 0.1 * global_noise)
         # Extrapolate noise for low frequencies (if enabled)
-        if oneoverf_correction:
-            noise = _extrapolate_noise(noise, freqs, time, width)
+        if oneoverf_extrapolate:
+            noise = _extrapolate_noise(noise, freqs, time, width, threshold=oneoverf_threshold)
         # Weighted normalization with floor
         denom = noise * coverage + eps
         power = residual / (denom + eps)
@@ -1050,9 +1098,11 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
         jn2 = jn2.T.ravel()[0:nstep]
     
     normalize_mode = getattr(tpy5_inputs, "normalize", "coverage_mad")
-    oneoverf_correction = getattr(tpy5_inputs, "oneoverf_correction", True)
+    oneoverf_correction = getattr(tpy5_inputs, "oneoverf_correction", False)
+    oneoverf_extrapolate = getattr(tpy5_inputs, "oneoverf_extrapolate", True)
+    oneoverf_threshold = getattr(tpy5_inputs, "oneoverf_threshold", None)
     periods, power, bper, epo, bpower, snr, tdur, depth = \
-        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction)
+        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
     if tpy5_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
                 filename, tpy5_inputs.plots)
