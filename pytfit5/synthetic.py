@@ -5,7 +5,131 @@ from typing import Tuple, Optional
 import pytfit5.transitmodel as transitm
 from pytfit5.transitmodel import transitModel
 import pytfit5.keplerian as kep
+import pytfit5.transitPy5 as tpy5
 
+
+def generate_red_noise(time, amplitude, alpha=1.0, seed=None):
+    """
+    Generate red noise with power-law spectrum.
+    
+    Parameters
+    ----------
+    time : array
+        Time array
+    amplitude : float
+        RMS amplitude of the noise
+    alpha : float
+        Power-law index (1.0 = pink noise, 2.0 = brown noise)
+    seed : int, optional
+        Random seed
+        
+    Returns
+    -------
+    noise : array
+        Red noise time series
+    """
+    rng = np.random.default_rng(seed)
+    n = len(time)
+    
+    # Generate white noise in frequency domain
+    freqs = np.fft.rfftfreq(n, d=np.median(np.diff(time)))
+    white = rng.normal(0, 1, len(freqs)) + 1j * rng.normal(0, 1, len(freqs))
+    
+    # Apply 1/f^alpha filter (avoid division by zero at DC)
+    freqs[0] = freqs[1]  # Set DC frequency to avoid division by zero
+    red = white / (freqs ** (alpha / 2.0))
+    
+    # Transform back to time domain
+    noise = np.fft.irfft(red, n=n)
+    
+    # Normalize to desired amplitude
+    noise = noise / np.std(noise) * amplitude
+    
+    return noise
+
+def generate_drw_noise(time, amplitude, tau, seed=None):
+    """
+    Generate damped random walk noise (exponential covariance).
+    
+    Parameters
+    ----------
+    time : array
+        Time array
+    amplitude : float
+        RMS amplitude
+    tau : float
+        Correlation timescale (days)
+    seed : int, optional
+        Random seed
+        
+    Returns
+    -------
+    noise : array
+        DRW time series
+    """
+    rng = np.random.default_rng(seed)
+    n = len(time)
+    dt = np.diff(time)
+    
+    noise = np.zeros(n)
+    noise[0] = rng.normal(0, amplitude)
+    
+    for i in range(1, n):
+        # AR(1) process with exponential decay
+        decay = np.exp(-dt[i-1] / tau)
+        innovation = np.sqrt(1 - decay**2) * amplitude
+        noise[i] = decay * noise[i-1] + rng.normal(0, innovation)
+    
+    return noise
+
+
+def generate_stellar_noise(time, granulation_amp=0.001, activity_amp=0.002, 
+                          rotation_period=None, spot_amp=0.005, seed=None):
+    """
+    Generate realistic multi-component stellar noise.
+    
+    Parameters
+    ----------
+    time : array
+        Time array
+    granulation_amp : float
+        RMS amplitude of granulation (short timescale)
+    activity_amp : float
+        RMS amplitude of activity (long timescale)
+    rotation_period : float, optional
+        Stellar rotation period for spot modulation (days)
+    spot_amp : float
+        Amplitude of rotational modulation
+    seed : int, optional
+        Random seed
+        
+    Returns
+    -------
+    noise : array
+        Combined stellar noise
+    """
+    rng = np.random.default_rng(seed)
+    
+    # Short timescale (granulation): tau ~ 0.5-2 days
+    gran_tau = rng.uniform(0.5, 2.0)
+    granulation = generate_drw_noise(time, granulation_amp, gran_tau, seed)
+    
+    # Long timescale (activity): tau ~ 10-50 days
+    activity_tau = rng.uniform(10, 50)
+    activity = generate_drw_noise(time, activity_amp, activity_tau, 
+                                   seed=seed+1 if seed else None)
+    
+    # Rotational modulation (if specified)
+    rotation = 0
+    if rotation_period is not None:
+        n_spots = rng.integers(1, 4)  # 1-3 spots
+        for i in range(n_spots):
+            phase = rng.uniform(0, 2*np.pi)
+            spot_decay = rng.exponential(rotation_period * 3)  # Spots evolve
+            envelope = np.exp(-time / spot_decay)
+            rotation += spot_amp * envelope * np.sin(2*np.pi*time/rotation_period + phase)
+    
+    return granulation + activity + rotation
 
 def generate_synthetic_lightcurve(
     t0: float,
@@ -14,31 +138,51 @@ def generate_synthetic_lightcurve(
     depth: float,
     snr: float,
     cadence: float = 1.0/48.0,
+    stellar_noise_type='multi', 
+    stellar_noise_amplitude=0.003,
+    rotation_period=None,
     seed: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, transitm.transit_model_class]:
+) -> Tuple[tpy5.phot_class, transitm.transit_model_class]:
     """
     Generate a synthetic lightcurve using PyTFit5 transit model for BLS testing.
 
     Parameters
-    - t0: Transit center time (days)
-    - per: Orbital period (days)
-    - time_length: Total time span of observations (days)
-    - depth: Transit depth (fractional, e.g., 0.01 for 1%)
-    - snr: Desired signal-to-noise ratio for the integrated transit signal
-           SNR = total_signal / (sigma * sqrt(n_in_transit))
-    - cadence: Sampling cadence in days (default 30 minutes = 1/48 day)
-    - seed: Optional random seed for reproducibility
+    ----------
+    t0 : float
+        Transit center time (days)
+    per : float
+        Orbital period (days)
+    time_length : float
+        Total time span of observations (days)
+    depth : float
+        Transit depth (fractional, e.g., 0.01 for 1%)
+    snr : float
+        Desired signal-to-noise ratio for the integrated transit signal
+        SNR = total_signal / (sigma * sqrt(n_in_transit))
+    cadence : float, optional
+        Sampling cadence in days (default 30 minutes = 1/48 day)
+    stellar_noise_type : str, optional
+        Type of stellar noise: 'none', 'red', 'drw', or 'multi' (default 'multi')
+    stellar_noise_amplitude : float, optional
+        RMS amplitude of stellar noise (default 0.003)
+    rotation_period : float, optional
+        Stellar rotation period for spot modulation (days)
+    seed : int, optional
+        Random seed for reproducibility
 
     Assumptions
+    -----------
     - Sun-like star defaults for limb darkening (TESS-like)
     - Single-planet, circular orbit, simple box-like depth controlled via rdr
     - Flux baseline normalized around 1.0
     - SNR computed from integrated signal across in-transit points
 
     Returns
-    - time: Array of observation times (days)
-    - flux: Synthetic flux array with noise, baseline ~1
-    - sol: Transit model solution object with injection parameters
+    -------
+    phot : phot_class
+        Photometry object containing time, flux, ferr, itime, tflag, icut, flux_f
+    sol : transit_model_class
+        Transit model solution object with injection parameters
     """
     if seed is not None:
         rng = np.random.default_rng(seed)
@@ -112,10 +256,41 @@ def generate_synthetic_lightcurve(
         # Fallback if no transit detected
         sigma = float(abs(depth)) / float(max(snr, 1e-9))
     
-    noise = rng.normal(0.0, sigma, size=time.shape[0])
+    white_noise = rng.normal(0.0, sigma, size=time.shape[0])
 
-    flux = f_model + noise
-    return time, flux, sol
+    # Add stellar noise
+    if stellar_noise_type == 'red':
+        stellar_noise = generate_red_noise(time, stellar_noise_amplitude, 
+                                           alpha=1.5, seed=seed)
+    elif stellar_noise_type == 'drw':
+        stellar_noise = generate_drw_noise(time, stellar_noise_amplitude, 
+                                           tau=5.0, seed=seed)
+    elif stellar_noise_type == 'multi':
+        stellar_noise = generate_stellar_noise(
+            time, 
+            granulation_amp=stellar_noise_amplitude * 0.3,
+            activity_amp=stellar_noise_amplitude * 0.5,
+            rotation_period=rotation_period,
+            spot_amp=stellar_noise_amplitude * 0.7 if rotation_period else 0,
+            seed=seed
+        )
+    else:
+        stellar_noise = 0
+    
+    # Combine all components
+    flux = f_model + white_noise + stellar_noise
+
+    # Create phot_class object similar to readphot()
+    phot = tpy5.phot_class()
+    phot.time = time
+    phot.flux = flux
+    phot.ferr = np.full_like(flux, sigma)  # Constant error bars based on white noise level
+    phot.itime = itime
+    phot.tflag = np.zeros(time.shape[0])   # Pre-populate array to mark transit data (=1 when in transit)
+    phot.flux_f = np.copy(flux)            # Copy of original flux for detrending
+    phot.icut = np.zeros(time.shape[0])    # Data cuts (0==keep, 1==toss)
+
+    return phot, sol
 
 
 def mark_in_transit(time: np.ndarray, t0: float, per: float, duration: float) -> np.ndarray:
@@ -293,7 +468,7 @@ def calculate_transit_overlap(
 
 
 def compare_bls_injection(
-    time: np.ndarray,
+    phot: tpy5.phot_class,
     sol_injected: transitm.transit_model_class,
     sol_bls: transitm.transit_model_class,
     verbose: bool = True
@@ -305,8 +480,8 @@ def compare_bls_injection(
     
     Parameters
     ----------
-    time : np.ndarray
-        Array of observation times (days)
+    phot : phot_class
+        Photometry object containing time array
     sol_injected : transit_model_class
         Solution object with injected transit parameters
     sol_bls : transit_model_class
@@ -329,7 +504,7 @@ def compare_bls_injection(
     bls_duration = kep.transitDuration(sol_bls, i_planet=0)
     
     result = calculate_transit_overlap(
-        time, injected_t0, injected_per, injected_duration,
+        phot.time, injected_t0, injected_per, injected_duration,
         bls_t0, bls_per, bls_duration
     )
     

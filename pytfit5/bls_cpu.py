@@ -21,6 +21,12 @@ from scipy import stats
 import concurrent.futures
 import os
 
+# Import tpy5_inputs_class from transitPy5
+from pytfit5.transitPy5 import tpy5_inputs_class
+
+# Backward compatibility alias (deprecated)
+gbls_inputs_class = tpy5_inputs_class
+
 #Constants
 G       = 6.674e-11           # N m^2 kg^-2  Gravitation constant
 Rsun    = 696265.0e0*1000.0e0 # m  radius of Sun
@@ -28,24 +34,6 @@ Msun    = 1.9891e30           # kg  mass of Sun
 pifac   = 1.083852140278e0    # (2pi)^(2/3)/pi
 day2sec = 86400.0             # seconds in a day
 onehour = 1.0/24.0            # one hour convected to day.
-
-class gbls_inputs_class:
-    def __init__(self):
-        self.filename = "filename.txt"
-        self.lcdir    = ""
-        self.zerotime = 0.0
-        self.freq1    = -1
-        self.freq2    = -1
-        self.ofac     = 8.0
-        self.Mstar    = 1.0
-        self.Rstar    = 1.0
-        self.nper     = 50000
-        self.minbin   = 5
-        self.plots    = 1    # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
-        self.multipro = 1    # 0 = single thread, 1 = multiprocessing
-        self.normalize = "iterative_baseline"  # Options: none, mad, percentile_mad, coverage_mad, iterative_baseline
-        self.return_spectrum = False  # If True, return full BLS spectrum (periods, power, freqs)
-        self.oneoverf_correction = True  # If True, apply 1/f correction for periods > baseline/2
 
 class gbls_ans_class:
     def __init__(self):
@@ -947,21 +935,21 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
 
     return periods, power, bper, epo, bpower, snr, tdur, depth
 
-def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
+def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
-    if gbls_inputs.lcdir == "":
-        filename = gbls_inputs.filename
+    if tpy5_inputs.lcdir == "":
+        filename = tpy5_inputs.filename
     else:
-        filename = gbls_inputs.lcdir + "/" + gbls_inputs.filename
-    Keptime  = gbls_inputs.zerotime
-    freq1    = gbls_inputs.freq1
-    freq2    = gbls_inputs.freq2
-    ofac     = gbls_inputs.ofac
-    Mstar    = gbls_inputs.Mstar
-    Rstar    = gbls_inputs.Rstar
-    minbin   = gbls_inputs.minbin
-    nper     = gbls_inputs.nper
-    multipro = gbls_inputs.multipro
+        filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+    Keptime  = tpy5_inputs.zerotime
+    freq1    = tpy5_inputs.freq1
+    freq2    = tpy5_inputs.freq2
+    ofac     = tpy5_inputs.ofac
+    Mstar    = tpy5_inputs.mstar
+    Rstar    = tpy5_inputs.rstar
+    minbin   = tpy5_inputs.minbin
+    nper     = tpy5_inputs.nper
+    multipro = tpy5_inputs.multipro
     
     if (time.shape[0] < 2) or (flux.shape[0] < 2):
         time, flux = readfile(filename)
@@ -1061,13 +1049,13 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
         jn1 = jn1.T.ravel()[0:nstep]
         jn2 = jn2.T.ravel()[0:nstep]
     
-    normalize_mode = getattr(gbls_inputs, "normalize", "coverage_mad")
-    oneoverf_correction = getattr(gbls_inputs, "oneoverf_correction", True)
+    normalize_mode = getattr(tpy5_inputs, "normalize", "coverage_mad")
+    oneoverf_correction = getattr(tpy5_inputs, "oneoverf_correction", True)
     periods, power, bper, epo, bpower, snr, tdur, depth = \
         calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction)
-    if gbls_inputs.plots > 0:
+    if tpy5_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
-                filename, gbls_inputs.plots)
+                filename, tpy5_inputs.plots)
 
     gbls_ans = gbls_ans_class()
     gbls_ans.epo    = epo
@@ -1078,7 +1066,7 @@ def bls(gbls_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.depth  = depth
     
     # Optionally store full spectrum
-    if gbls_inputs.return_spectrum:
+    if tpy5_inputs.return_spectrum:
         gbls_ans.periods = periods
         gbls_ans.power = power
         gbls_ans.freqs = freqs
