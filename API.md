@@ -63,11 +63,11 @@ The Box-Least-Squares (BLS) algorithm is used to detect periodic transit signals
 
 ### Core Classes
 
-#### `gbls_inputs_class`
+#### `tpy5_inputs_class`
 
-Configuration class for BLS search parameters.
+Unified configuration class for BLS search, detrending, and transit fitting parameters.
 
-**Attributes:**
+**BLS Search Parameters:**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -77,44 +77,68 @@ Configuration class for BLS search parameters.
 | `freq1` | float | `-1` | Minimum search frequency (c/d) |
 | `freq2` | float | `-1` | Maximum search frequency (c/d) |
 | `ofac` | float | `8.0` | Oversampling factor for frequency grid |
-| `Mstar` | float | `1.0` | Stellar mass (solar masses) |
-| `Rstar` | float | `1.0` | Stellar radius (solar radii) |
+| `mstar` | float | `1.0` | Stellar mass (solar masses) |
+| `rstar` | float | `1.0` | Stellar radius (solar radii) |
 | `nper` | int | `50000` | Maximum number of periods to search |
 | `minbin` | int | `5` | Minimum bins in transit |
 | `plots` | int | `1` | Plot mode: 0=none, 1=X11, 2=PNG+X11, 3=PNG |
 | `multipro` | int | `1` | Enable multiprocessing (0=off, 1=on) |
 | `normalize` | str | `"iterative_baseline"` | Normalization mode (see below) |
 | `return_spectrum` | bool | `False` | If True, return full BLS spectrum in result |
+| `oneoverf_correction` | bool | `False` | Enable 1/f baseline correction |
+| `oneoverf_extrapolate` | bool | `True` | Enable baseline/noise extrapolation for long periods |
+
+**Detrending Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `boxbin` | float | `5.0` | Detrending window size (days) |
+| `nfitp` | int | `3` | Polynomial order for detrending |
+| `iter_max_iters` | int | `5` | Maximum iterations for iterative detrending |
+| `iter_sigma_threshold` | float | `3.0` | Sigma threshold for outlier rejection |
+| `iter_min_duration` | float | `0.05` | Minimum transit duration to protect (days) |
 
 **Normalization Modes:**
 
 - `"none"` - No normalization, raw BLS power
-- `"mad"` - Median Absolute Deviation normalization
-- `"percentile_mad"` - 75th percentile baseline with MAD noise
-- `"coverage_mad"` - MAD weighted by frequency bin coverage
-- `"iterative_baseline"` - **Default and recommended** - Uses sigma-clipping to robustly identify continuum, preventing strong peaks from biasing normalization. Best for most applications.
+- `"mad"` - Median Absolute Deviation normalization with rolling window
+- `"percentile_mad"` - 75th percentile baseline with MAD noise estimation
+- `"coverage_mad"` - MAD weighted by expected duty cycle at each frequency
+- `"iterative_baseline"` - **Default and recommended** - Uses sigma-clipping to robustly identify continuum by iteratively masking strong peaks. Prevents high-SNR signals from biasing baseline estimation. Most robust for varying signal strengths.
 
-**Long-Period Extrapolation:**
+**1/f Baseline Correction and Extrapolation:**
 
-For periods longer than 0.5× the observation baseline, BLS cannot reliably measure the baseline and noise floor due to insufficient frequency resolution. The code automatically:
-1. Measures median baseline and noise in well-sampled region (periods < 0.25× baseline)
-2. Extends with flat (constant) values for long periods (> 0.5× baseline)
-3. Uses smooth cosine-tapered blending in transition region (0.35-0.5× baseline)
-4. Assumes noise floor is flat at long periods for conservative, unbiased detection
+When `oneoverf_correction=True`, the BLS code removes low-frequency trends (red noise, stellar variability) before computing the periodogram:
+
+1. **Iterative Baseline Estimation**: Uses sigma-clipping to identify the true continuum level while masking strong transit peaks
+2. **Baseline Subtraction**: Removes the estimated baseline before normalization
+
+When `oneoverf_extrapolate=True` (default), the code handles long-period signals more robustly:
+
+1. **Detection Threshold**: For periods > 0.5× baseline, fewer than 2 full periods are observed
+2. **Well-Sampled Region**: Computes baseline and noise statistics for periods < 0.3× baseline
+3. **Flat Extrapolation**: Extends baseline and noise as constant values for long periods
+4. **Smooth Transition**: Uses cosine-tapered blending in the 0.3-0.5× baseline transition region
+
+This prevents artificial suppression of long-period signals and maintains proper SNR scaling.
+
+**Note**: The `gbls_inputs_class` is deprecated. Use `tpy5_inputs_class` instead, which provides unified configuration for BLS, detrending, and transit fitting.
 
 **Example:**
 
 ```python
-import pytfit5.gbls as gbls
+import pytfit5.transitPy5 as tpy5
 
-# Configure BLS search
-inputs = gbls.gbls_inputs_class()
+# Configure BLS search using unified inputs class
+inputs = tpy5.tpy5_inputs_class()
 inputs.freq1 = 1.0 / 60.0  # Search periods from 1 to 60 days
 inputs.freq2 = 2.0
 inputs.ofac = 10.0
-inputs.Mstar = 1.0
-inputs.Rstar = 1.0
+inputs.mstar = 1.0
+inputs.rstar = 1.0
 inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True  # Enable 1/f baseline correction
+inputs.oneoverf_extrapolate = True  # Enable long-period extrapolation
 ```
 
 ---
@@ -497,6 +521,176 @@ print(f"In-transit points: {np.sum(in_transit)}")
 
 ---
 
+## Period Validation Module (`pytfit5.period_validation`)
+
+Tools for validating BLS-detected periods by checking for aliases and single-transit events.
+
+### Functions
+
+#### `validate_bls_period(time, flux, bls_result, test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0], optimize_t0=True, verbose=False)`
+
+Validate a BLS-detected period by testing for period aliases and single-transit events.
+
+**Parameters:**
+
+- `time` (np.ndarray): Observation times (days)
+- `flux` (np.ndarray): Flux values (normalized around 0)
+- `bls_result` (gbls_ans_class): BLS detection result object
+- `test_factors` (list): Period factors to test (default: [0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+- `optimize_t0` (bool): Optimize epoch for each period hypothesis (default: True)
+- `verbose` (bool): Print detailed validation report (default: False)
+
+**Returns:**
+
+- `results` (dict): Validation results containing:
+  - `best_period` (float): Best validated period
+  - `best_t0` (float): Optimized epoch for best period
+  - `best_factor` (float): Period factor of best match
+  - `best_snr` (float): SNR at best period
+  - `best_n_transits` (int): Number of transits at best period
+  - `is_alias` (bool): True if best period differs from BLS period
+  - `is_single_transit` (bool): True if only one transit detected
+  - `snr_improvement` (float): SNR ratio (best/original)
+  - `all_results` (list): Results for all tested factors
+  
+- `transit_info` (dict): Individual transit information:
+  - `transit_times` (np.ndarray): Time of each detected transit
+  - `transit_snrs` (np.ndarray): SNR of each individual transit
+  - `transit_depths` (np.ndarray): Depth of each individual transit
+
+**Example:**
+
+```python
+from pytfit5 import period_validation as pval
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+
+# Run BLS
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 0.05
+inputs.freq2 = 2.0
+inputs.normalize = "iterative_baseline"
+
+bls_ans = gbls.bls(inputs, time, flux)
+
+# Validate the period
+results, transit_info = pval.validate_bls_period(
+    time=time,
+    flux=flux,
+    bls_result=bls_ans,
+    test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
+    optimize_t0=True,
+    verbose=True
+)
+
+# Handle validation results
+if results['is_alias']:
+    print(f"Period alias detected! True period: {results['best_period']:.6f} days")
+    bls_ans.bper = results['best_period']
+    bls_ans.epo = results['best_t0']
+    
+elif results['is_single_transit']:
+    print(f"Single transit detected at {transit_info['transit_times'][0]:.6f} days")
+    # Use highest SNR transit as reference
+    max_snr_idx = np.argmax(transit_info['transit_snrs'])
+    bls_ans.epo = transit_info['transit_times'][max_snr_idx]
+    # Estimate period using stellar density
+    P_est, P_min, _, _ = pval.estimate_single_transit_period(
+        time=time, tdur=bls_ans.tdur,
+        rho_star=pval.get_stellar_density(inputs.mstar, inputs.rstar)
+    )
+    bls_ans.bper = P_est
+    
+else:
+    print(f"Period confirmed: {bls_ans.bper:.6f} days")
+    bls_ans.epo = results['best_t0']  # Use optimized epoch
+```
+
+---
+
+#### `estimate_single_transit_period(time, tdur, rho_star, margin_factor=1.5)`
+
+Estimate the orbital period for a single-transit event using stellar density constraints.
+
+**Parameters:**
+
+- `time` (np.ndarray): Observation times (days)
+- `tdur` (float): Transit duration (days)
+- `rho_star` (float): Stellar density (g/cm³)
+- `margin_factor` (float): Safety margin for period estimate (default: 1.5)
+
+**Returns:**
+
+- `P_estimate` (float): Estimated period (days)
+- `P_min` (float): Minimum period constrained by data (days)
+- `is_constrained` (bool): Whether estimate is constrained by stellar density
+- `expected_transits` (float): Expected number of transits at estimated period
+
+**Formula:**
+
+For a circular orbit with transit duration $\tau$:
+
+$$P_{\text{min}} \approx \left(\frac{3\pi}{G\rho_\star}\right)^{1/2} \tau^{3/2}$$
+
+The code returns `P_estimate = margin_factor × P_min` to account for non-zero impact parameters.
+
+**Example:**
+
+```python
+from pytfit5 import period_validation as pval
+
+# For a single-transit event
+P_est, P_min, is_constrained, n_transits = pval.estimate_single_transit_period(
+    time=time,
+    tdur=0.12,  # 2.88 hours
+    rho_star=1.4,  # Solar-like density
+    margin_factor=1.5
+)
+
+print(f"Estimated period: {P_est:.2f} days")
+print(f"Minimum period: {P_min:.2f} days")
+print(f"Expected transits in dataset: {n_transits:.2f}")
+```
+
+---
+
+#### `compute_transit_snr(time, flux, t0, period, tdur, n_dur=1.5)`
+
+Compute SNR for a specific period and epoch hypothesis.
+
+**Parameters:**
+
+- `time` (np.ndarray): Observation times (days)
+- `flux` (np.ndarray): Flux values (normalized around 0)
+- `t0` (float): Transit epoch (days)
+- `period` (float): Orbital period (days)
+- `tdur` (float): Transit duration (days)
+- `n_dur` (float): Number of transit durations for in-transit window (default: 1.5)
+
+**Returns:**
+
+- `snr` (float): Signal-to-noise ratio
+- `depth` (float): Transit depth (fractional)
+- `n_transits` (int): Number of transits detected
+- `in_transit_mask` (np.ndarray): Boolean mask of in-transit points
+
+---
+
+#### `get_stellar_density(mass_solar, radius_solar)`
+
+Calculate stellar density from mass and radius.
+
+**Parameters:**
+
+- `mass_solar` (float): Stellar mass (solar masses)
+- `radius_solar` (float): Stellar radius (solar radii)
+
+**Returns:**
+
+- `rho` (float): Mean stellar density (g/cm³)
+
+---
+
 ## Keplerian Utilities (`pytfit5.kep`)
 
 Orbital mechanics and stellar parameter utilities.
@@ -548,42 +742,71 @@ Run MCMC analysis on transit lightcurve.
 
 ## Examples
 
-### Example 1: Basic BLS Search
+### Example 1: Basic BLS Search with Period Validation
 
 ```python
-import pytfit5.gbls as gbls
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+from pytfit5 import period_validation as pval
 import numpy as np
 
 # Load data
-time, flux = gbls.readfile("star_lightcurve.txt")
+phot = tpy5.readphot("star_lightcurve.txt")
 
-# Configure BLS
-inputs = gbls.gbls_inputs_class()
+# Configure BLS using unified inputs class
+inputs = tpy5.tpy5_inputs_class()
 inputs.freq1 = 0.1  # 10-day maximum period
 inputs.freq2 = 4.0  # 0.25-day minimum period
 inputs.ofac = 10.0
-inputs.Mstar = 0.8
-inputs.Rstar = 0.75
+inputs.mstar = 0.8
+inputs.rstar = 0.75
 inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True
+inputs.oneoverf_extrapolate = True
 
 # Search for transits
-ans, freqs, power = gbls.bls(time, flux, inputs)
+ans = gbls.bls(inputs, phot.time, phot.flux)
 
 print(f"Detected Period: {ans.bper:.4f} days")
 print(f"Transit Epoch: {ans.epo:.4f}")
 print(f"SNR: {ans.snr:.1f}")
 print(f"Depth: {ans.depth*1e6:.1f} ppm")
+
+# Validate the period (check for aliases and single transits)
+results, transit_info = pval.validate_bls_period(
+    time=phot.time,
+    flux=phot.flux,
+    bls_result=ans,
+    test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
+    optimize_t0=True,
+    verbose=True
+)
+
+# Update BLS results based on validation
+if results['is_alias']:
+    print(f"\nPeriod alias detected! Updating to {results['best_period']:.4f} days")
+    ans.bper = results['best_period']
+    ans.epo = results['best_t0']
+elif results['is_single_transit']:
+    # Use highest SNR transit as reference
+    max_snr_idx = np.argmax(transit_info['transit_snrs'])
+    ans.epo = transit_info['transit_times'][max_snr_idx]
+    print(f"\nSingle transit at {ans.epo:.4f} days")
+else:
+    ans.epo = results['best_t0']  # Use optimized epoch
+    print(f"\nPeriod confirmed: {ans.bper:.4f} days")
 ```
 
 ### Example 2: High-SNR Synthetic Test
 
 ```python
 from pytfit5.synthetic import generate_synthetic_lightcurve
-import pytfit5.gbls as gbls
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
 import matplotlib.pyplot as plt
 
 # Generate high-SNR synthetic data
-time, flux = generate_synthetic_lightcurve(
+phot, sol_injected = generate_synthetic_lightcurve(
     t0=2.5,
     per=8.3,
     time_length=100.0,
@@ -593,12 +816,13 @@ time, flux = generate_synthetic_lightcurve(
 )
 
 # BLS with iterative baseline (robust to high SNR)
-inputs = gbls.gbls_inputs_class()
+inputs = tpy5.tpy5_inputs_class()
 inputs.freq1 = 0.01
 inputs.freq2 = 2.0
 inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True
 
-ans, freqs, power = gbls.bls(time, flux, inputs)
+ans = gbls.bls(inputs, phot.time, phot.flux)
 
 # Plot results
 plt.figure(figsize=(12, 4))
@@ -622,10 +846,11 @@ plt.show()
 
 ```python
 from pytfit5.synthetic import generate_synthetic_lightcurve
-import pytfit5.gbls as gbls
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
 
 # Generate long-period transit in short baseline
-time, flux = generate_synthetic_lightcurve(
+phot, sol_injected = generate_synthetic_lightcurve(
     t0=5.0,
     per=45.0,  # Period close to baseline length
     time_length=60.0,
@@ -635,16 +860,94 @@ time, flux = generate_synthetic_lightcurve(
 )
 
 # BLS will extrapolate baseline for periods > 0.5*60 = 30 days
-inputs = gbls.gbls_inputs_class()
-inputs.freq1 = 1.0/60.0
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 1.0/60.0  # Search up to 60-day periods
 inputs.freq2 = 1.0
 inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True    # Enable baseline correction
+inputs.oneoverf_extrapolate = True   # Enable long-period extrapolation
 
-ans, freqs, power = gbls.bls(time, flux, inputs)
+ans = gbls.bls(inputs, phot.time, phot.flux)
 
 print(f"True period: 45.0 days")
 print(f"Recovered period: {ans.bper:.2f} days")
 print(f"SNR: {ans.snr:.1f}")
+print(f"\nExtrapolation active for periods > {0.5*60:.1f} days")
+```
+
+### Example 4: Single-Transit Event Handling
+
+```python
+from pytfit5.synthetic import generate_synthetic_lightcurve
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+from pytfit5 import period_validation as pval
+import numpy as np
+
+# Generate very long-period transit (only 1 transit in 60-day baseline)
+phot, sol_injected = generate_synthetic_lightcurve(
+    t0=10.0,
+    per=85.0,  # Much longer than baseline
+    time_length=60.0,
+    depth=0.008,
+    snr=12.0,
+    seed=456
+)
+
+# Configure BLS
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 0.5 / 60.0  # Search to 2× baseline
+inputs.freq2 = 2.0
+inputs.mstar = 1.0
+inputs.rstar = 1.0
+inputs.normalize = "iterative_baseline"
+inputs.oneoverf_correction = True
+inputs.oneoverf_extrapolate = True
+
+# Run BLS
+ans = gbls.bls(inputs, phot.time, phot.flux)
+
+print(f"BLS detected period: {ans.bper:.2f} days")
+print(f"BLS SNR: {ans.snr:.1f}")
+
+# Validate - should detect single transit
+results, transit_info = pval.validate_bls_period(
+    time=phot.time,
+    flux=phot.flux,
+    bls_result=ans,
+    test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
+    optimize_t0=True,
+    verbose=True
+)
+
+if results['is_single_transit']:
+    print(f"\n✓ Single transit detected!")
+    
+    # Find the highest SNR transit (most reliable)
+    max_snr_idx = np.argmax(transit_info['transit_snrs'])
+    single_transit_time = transit_info['transit_times'][max_snr_idx]
+    single_transit_snr = transit_info['transit_snrs'][max_snr_idx]
+    
+    print(f"  Transit time: {single_transit_time:.4f} days")
+    print(f"  Transit SNR: {single_transit_snr:.2f}")
+    
+    # Estimate period using stellar density
+    P_est, P_min, is_constrained, n_transits = pval.estimate_single_transit_period(
+        time=phot.time,
+        tdur=ans.tdur,
+        rho_star=pval.get_stellar_density(inputs.mstar, inputs.rstar),
+        margin_factor=1.5
+    )
+    
+    print(f"\n  Estimated period: {P_est:.2f} days")
+    print(f"  Minimum period: {P_min:.2f} days")
+    print(f"  Expected transits: {n_transits:.2f}")
+    print(f"  True period: {sol_injected.per[0]:.2f} days")
+    
+    # Update BLS results
+    ans.bper = P_est
+    ans.epo = single_transit_time  # Use highest SNR transit time
+    ans.snr = single_transit_snr
 ```
 
 ---
