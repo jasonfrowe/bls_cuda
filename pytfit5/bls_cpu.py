@@ -943,40 +943,72 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     power = np.where(np.isfinite(power), power, -1e30)
 
     psort = np.argsort(power) #Get sorted indicies to find best event
-
     bpower = power[psort[-1]]     #Power of best event
     bper   = periods[psort[-1]]   #Period of best event
     
     in1   = jn1[psort[-1]]        #start of ingress (based on BLS, so there is will be some error)
     in2   = jn2[psort[-1]]        #end of egress 
 
+    # Calculate duration
+    maxt = np.max(time)
+    mint = np.min(time)
+    duration = maxt - mint
+
+    # Determine scaling factor: 
+    # If standard BLS: scale = bper
+    # If single event (bper > duration): scale = duration
+    if bper > duration:
+        scale_per = duration
+    else:
+        scale_per = bper
+
     # apply boundary fixes to in1, in2
     # pad in1,in2 by 1 and make sure we don't step outside [0,nb-1]
-    if in2 > nb:
-        in2 = in2 - nb
-
+    # if in2 > nb:
+    #     in2 = in2 - nb
+    
     # pad in1,in2 by 1 and make sure we don't step outside [0,nb-1]
+    # in1 = in1 - 1
+    # if in1<0:
+    #     in1=in1+nb
+    # in2 = in2 + 1
+    # if in2 > nb - 1: 
+    #     in2 = in2 - nb + 1
+    # if in1 == in2: 
+    #     in2 = in1 + 1
+
+    if in2 > nb: in2 = in2 - nb
     in1 = in1 - 1
-    if in1<0:
-        in1=in1+nb
+    if in1 < 0: in1 = in1 + nb
     in2 = in2 + 1
-    if in2 > nb - 1: 
-        in2 = in2 - nb + 1
-    if in1 == in2: 
-        in2 = in1 + 1
+    if in2 > nb - 1: in2 = in2 - nb + 1
+    if in1 == in2: in2 = in1 + 1
+
+    # Time of first Transit
+    # if in1 < in2:
+    #     epo = mintime + bper * ( (in1 + in2)/2.0 / nb)
+    # else:
+    #     epo = mintime + bper * ( (in1 + in2 - nb + 1) / 2.0 / nb )
+    # epo = epo - Keptime
 
     # Time of first Transit
     if in1 < in2:
-        epo = mintime + bper * ( (in1 + in2)/2.0 / nb)
+        epo = mintime + scale_per * ( (in1 + in2)/2.0 / nb)
     else:
-        epo = mintime + bper * ( (in1 + in2 - nb + 1) / 2.0 / nb )
+        epo = mintime + scale_per * ( (in1 + in2 - nb + 1) / 2.0 / nb )
     epo = epo - Keptime
 
     # Transit duration.  (units = period = days)
+    # if in1 <= in2:
+    #     tdur = bper * (in2 - in1) / nb
+    # else:
+    #     tdur = bper * (in2 + nb - 1 - in1) / nb
+
+    # Transit duration
     if in1 <= in2:
-        tdur = bper * (in2 - in1) / nb
+        tdur = scale_per * (in2 - in1) / nb
     else:
-        tdur = bper * (in2 + nb - 1 - in1) / nb
+        tdur = scale_per * (in2 + nb - 1 - in1) / nb
 
     #Dirty translation of Fortran from transitfind5
     fmean, std, depth, snr = bls_stats(epo, bper, tdur, npt, time + mintime - Keptime, flux) 
@@ -1064,8 +1096,16 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
         jn1   = np.zeros_like(freqs, dtype=np.int32)
         jn2   = np.zeros_like(freqs, dtype=np.int32)
         
+        # for i in tqdm(range(nstep)):
+        #     p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+
+        duration = np.max(time) - np.min(time) # Should be ~ max(time) as min is 0
+
         for i in tqdm(range(nstep)):
-            p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+            if (1.0 / freqs[i]) > duration:
+                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+            else:
+                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
 
     else: 
         # Store our answers
@@ -1123,17 +1163,252 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     return gbls_ans
 
+# def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
+    
+#     p   = np.zeros((ndiv))
+#     jn1 = np.zeros((ndiv), dtype = np.int32)
+#     jn2 = np.zeros((ndiv), dtype = np.int32)
+
+#     j = 0
+#     for i in iarg:
+#         p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+#         j += 1
+    
+#     return p, jn1, jn2
+
+@jit(nopython=True)
+def bls_pulse_kernel(flux_binned, counts_binned, widths, sigma):
+    """
+    Scans for single pulses. Returns the Signal-to-Noise Ratio (SNR).
+    Enforces DIPS ONLY (flux sum < 0).
+    """
+    nb = len(flux_binned)
+    n_widths = len(widths)
+    
+    best_snr = np.zeros(n_widths)
+    best_starts = np.zeros(n_widths, dtype=np.int32)
+    best_depths = np.zeros(n_widths)
+    
+    # Precompute Integral Images
+    cum_y = np.zeros(nb + 1)
+    cum_c = np.zeros(nb + 1, dtype=np.int32)
+    
+    for i in range(nb):
+        cum_y[i+1] = cum_y[i] + flux_binned[i]
+        cum_c[i+1] = cum_c[i] + counts_binned[i]
+        
+    # Iterate over durations
+    for w_idx in range(n_widths):
+        width = widths[w_idx]
+        
+        max_snr = 0.0 # Start at 0, ignore positive peaks
+        best_idx = -1
+        depth = 0.0
+        
+        # Scan
+        for i in range(nb - width + 1):
+            s = cum_y[i + width] - cum_y[i] # Sum of flux
+            r = cum_c[i + width] - cum_c[i] # Count of points
+            
+            # Check for valid bin and TRANSIT (s < 0)
+            if r > 0 and s < 0:
+                # SNR calculation
+                # SNR = |Signal_Sum| / (Sigma_per_point * sqrt(Points))
+                # This assumes white noise for the normalization
+                current_snr = np.abs(s) / (sigma * np.sqrt(r))
+                
+                if current_snr > max_snr:
+                    max_snr = current_snr
+                    best_idx = i
+                    depth = s / r 
+
+        best_snr[w_idx] = max_snr
+        best_starts[w_idx] = best_idx
+        best_depths[w_idx] = depth
+        
+    return best_snr, best_starts, best_depths
+
+def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=12.0, bin_duration_days=None):
+    
+    # 1. Detrend / Zero-Center
+    # Crucial step: Remove median to prevent wide boxes from grabbing offsets
+    # For very long datasets, consider a high-pass filter or running median here.
+    med_flux = np.median(flux)
+    flux_norm = flux - med_flux
+    
+    # Calculate robust sigma (MAD) for SNR scaling
+    mad = np.median(np.abs(flux_norm))
+    sigma = mad * 1.4826
+    
+    t_start = time[0]
+    duration = time[-1] - t_start
+    
+    # 2. Binning
+    if bin_duration_days is None:
+        bin_duration_days = 10.0 / 1440.0 # ~10 mins
+        
+    nb = int(duration / bin_duration_days) + 1
+    
+    indices = ((time - t_start) / bin_duration_days).astype(int)
+    mask = (indices >= 0) & (indices < nb)
+    indices = indices[mask]
+    flux_subset = flux_norm[mask] # Use zero-centered flux
+    
+    c_binned = np.bincount(indices, minlength=nb)
+    y_binned = np.bincount(indices, weights=flux_subset, minlength=nb)
+    
+    # 3. Duration Grid
+    min_width = int((min_duration_hours / 24.0) / bin_duration_days)
+    max_width = int((max_duration_hours / 24.0) / bin_duration_days)
+    if min_width < 1: min_width = 1
+    if max_width > nb: max_width = nb
+    
+    widths = np.arange(min_width, max_width + 1, dtype=np.int32)
+    
+    if len(widths) == 0:
+        return None
+        
+    # 4. Run Kernel (Pass sigma)
+    snrs, starts, depths = bls_pulse_kernel(y_binned, c_binned, widths, sigma)
+    
+    # 5. Extract Best Result
+    best_idx = np.argmax(snrs)
+    best_snr = snrs[best_idx]
+    
+    best_width_bins = widths[best_idx]
+    best_start_bin  = starts[best_idx]
+    best_depth = depths[best_idx]
+    
+    best_duration = best_width_bins * bin_duration_days
+    best_t0 = t_start + (best_start_bin + 0.5 * best_width_bins) * bin_duration_days
+    
+    return {
+        'snr': best_snr,              # Now in SNR units
+        't0': best_t0,
+        'duration': best_duration,
+        'depth': best_depth,
+        'spectrum_duration': widths * bin_duration_days * 24.0,
+        'spectrum_snr': snrs
+    }
+
+
+
+@jit(nopython=True)
+def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
+    """
+    BLS kernel optimized for single event searches (Period > Duration).
+    """
+    # Explicitly cast nb to int for array creation
+    nb = int(nb)
+    npt = time.shape[0]
+    
+    # Duration of the dataset (Assuming time starts at 0, or is shifted)
+    duration = time[npt-1]
+    
+    if duration <= 0:
+        return 0.0, 0, 0
+
+    nbm1 = int(nb - 1)
+    
+    # No buffer for wrapping needed
+    ibi = np.zeros(nb, dtype=np.int32)
+    y = np.zeros(nb, dtype=np.float64)
+    
+    # Bin the data: Map 0..duration to 0..nb
+    # scale factor to convert time to bin index
+    scale = nbm1 / duration
+    
+    for i in range(npt):
+        # Map time[i] directly to a bin
+        j = int(time[i] * scale)
+        if j < nb:
+            ibi[j] += 1
+            y[j] += flux[i]
+            
+    # Calculate search parameters based on physics
+    fsec = freq / day2sec
+    q = pifac * Rstar * Rsun / (G * Mstar * Msun)**(1.0/3.0) * fsec**(2.0/3.0)
+    
+    # Calculate ratio of Period to Duration: P / T_dur = (1/f) / duration
+    # This scales the duty cycle 'q' (fraction of Period) to fraction of the Array (Duration)
+    pd_ratio = (1.0 / freq) / duration
+    
+    # Define limits for transit duration
+    qmi = q / 2.0
+    if qmi < onehour*freq/2:
+        qmi = onehour*freq/2
+        
+    qma = q * 2.0
+    if qma > 0.25:
+        qma = 0.25
+        
+    if qmi > qma:
+        qma = qmi * 2.0
+        if qma > 0.4:
+            qma = 0.4
+            
+    # Scale q limits (fraction of Period) to bin counts over the Duration
+    # bins = q * (Period/Duration) * nb
+    kmi = int(qmi * pd_ratio * nb)
+    if kmi < 1: kmi = 1
+    
+    kma = int(qma * pd_ratio * nb) + 1
+    if kma > nb: kma = nb
+    
+    # Minimum points in transit check
+    kkmi = int(npt * qmi * pd_ratio)
+    if kkmi < 5: kkmi = 5
+    
+    p = 0.0
+    jn1 = 0
+    jn2 = 0
+    
+    # Search loop (Linear scan, no wrapping)
+    # i is start bin, j is end bin
+    for i in range(nb):
+        s = 0.0
+        k = 0
+        kk = 0
+        
+        # Determine max end index (clamped to nb)
+        jmax = i + kma + 1
+        if jmax > nb: jmax = nb
+        
+        for j in range(i, jmax):
+            k += 1          # width in bins
+            kk += ibi[j]    # count of points in bin j
+            s += y[j]       # sum of flux in bin j
+            
+            # Check conditions
+            if k > kmi and kk > kkmi:
+                dfac = kk * (npt - kk)
+                if dfac > 0:
+                    pow1 = s*s / dfac
+                    if pow1 > p:
+                        p = pow1
+                        jn1 = i
+                        jn2 = j
+                        
+    return p, jn1, jn2
+
 def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
     
-    p   = np.zeros((ndiv))
+    p = np.zeros((ndiv))
     jn1 = np.zeros((ndiv), dtype = np.int32)
     jn2 = np.zeros((ndiv), dtype = np.int32)
+    
+    # Calculate duration once
+    duration = time[-1] - time[0] 
 
     j = 0
     for i in iarg:
-        p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+        # Check if Period > Duration
+        if (1.0 / freqs[i]) > duration:
+            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+        else:
+            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
         j += 1
-    
+        
     return p, jn1, jn2
 
 @jit(nopython=True)
