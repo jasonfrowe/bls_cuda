@@ -586,6 +586,11 @@ class tpy5_inputs_class:
         self.oneoverf_extrapolate = True # If True, extrapolate baseline/noise for periods > threshold
         self.oneoverf_threshold = None   # Period threshold for extrapolation (days). None = use baseline length 
 
+        # Pulse search parameters
+        self.pulse_min_duration_hours = 1.0
+        self.pulse_max_duration_hours = 12.0
+        self.pulse_bin_duration_days = None
+
 class exocat_class:
     def __init__(self):
         self.ticid=[]

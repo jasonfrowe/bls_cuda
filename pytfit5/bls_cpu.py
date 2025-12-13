@@ -23,6 +23,7 @@ import os
 
 # Import tpy5_inputs_class from transitPy5
 from pytfit5.transitPy5 import tpy5_inputs_class
+from pytfit5 import period_validation as pval
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -701,11 +702,11 @@ def _extrapolate_baseline(baseline, freqs, time, width, threshold=None):
     Returns:
     - baseline_corrected: baseline with extrapolated values at long periods
     """
-    T_baseline = np.max(time) - np.min(time)
+    T_baseline = ( np.max(time) - np.min(time) ) 
     
     # Use provided threshold or default to baseline length
     if threshold is None:
-        threshold = T_baseline
+        threshold = T_baseline 
     
     # Threshold: periods > threshold need extrapolation
     # In frequency space: freqs < 1/threshold
@@ -763,9 +764,9 @@ def _extrapolate_noise(noise, freqs, time, width, threshold=None):
     Returns:
     - noise_corrected: noise with extrapolated values at long periods
     """
-    T_baseline = np.max(time) - np.min(time)
+    T_baseline = ( np.max(time) - np.min(time) ) 
     
-    # Use provided threshold or default to baseline length
+    # Use provided threshold or default to baseline length / 2
     if threshold is None:
         threshold = T_baseline
     
@@ -1488,4 +1489,275 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
                         jn2 = j        
     
     return p, jn1, jn2
+
+def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
+    """
+    Plotting routine for single pulse results.
+    """
+    rcParams.update({'font.size': 12})
+    rcParams['axes.linewidth'] = 2.0
+    rcParams['font.family'] = 'monospace'
+
+    fig = plt.figure(figsize=(10, 8))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1])
+    
+    # Panel 1: Full Time Series
+    ax1 = plt.subplot(gs[0])
+    
+    # X-axis: Time + mintime - Keptime (BJD/BKJD)
+    x = time + mintime - Keptime
+    y = flux + 1.0
+    
+    ax1.plot(x, y, 'k.', markersize=1)
+    ax1.set_ylabel("Relative Flux")
+    ax1.set_xlabel("Time (days)")
+    ax1.set_title("Single Pulse Detection")
+    
+    # Mark the event
+    # ans.epo is in 'time' frame (0-based)
+    t0_plot = ans.epo + mintime - Keptime
+    dur = ans.tdur
+    
+    ymin, ymax = ax1.get_ylim()
+    ax1.axvline(t0_plot, color='r', alpha=0.5)
+    ax1.axvspan(t0_plot - dur/2, t0_plot + dur/2, color='r', alpha=0.2)
+    
+    # Bottom Row Split
+    gs_bottom = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[1], width_ratios=[1, 2])
+    
+    # Panel 3: Stats (Bottom Left)
+    ax3 = plt.subplot(gs_bottom[0])
+    ax3.axis('off')
+    
+    stats_text = [
+        f"Type: Single Pulse",
+        f"T0   = {t0_plot:.6f} days",
+        f"Dur  = {ans.tdur*24:.2f} hours",
+        f"Depth= {ans.depth*1e6:.0f} ppm",
+        f"SNR  = {ans.snr:.1f}"
+    ]
+    
+    for i, line in enumerate(stats_text):
+        ax3.text(0.1, 0.8 - i*0.15, line, fontsize=14)
+    
+    # Panel 2: Zoomed View (Bottom Right)
+    ax2 = plt.subplot(gs_bottom[1])
+    
+    # Zoom window: +/- 3 durations or fixed width
+    window = max(3 * dur, 0.5) # at least 0.5 days
+    
+    # Mask based on x (plot coordinates)
+    mask = np.abs(x - t0_plot) < window
+    
+    if np.sum(mask) > 0:
+        ax2.plot(x[mask], y[mask], 'k.', markersize=3)
+        ax2.set_xlim(t0_plot - window, t0_plot + window)
+        
+        # Plot box model
+        t_model = np.linspace(t0_plot - window, t0_plot + window, 1000)
+        f_model = np.ones_like(t_model)
+        in_transit = np.abs(t_model - t0_plot) < dur/2
+        f_model[in_transit] = 1.0 - ans.depth
+        
+        ax2.plot(t_model, f_model, 'r-', alpha=0.7, linewidth=2)
+        
+    ax2.set_ylabel("Relative Flux")
+    ax2.set_xlabel("Time (days)")
+    ax2.set_title("Zoomed Event")
+    
+    plt.tight_layout()
+    
+    if plots == 2:        
+        directory = os.path.dirname(filename)
+        if is_writable(directory):
+            filename_without_extension = ".".join(filename.split(".")[:-1])
+            fig.savefig(filename_without_extension+"_pulse.png", dpi=150)
+        else:
+            print("Warning: Path to datafile not writable, attempting to make plot in current directory")
+            filename_base = os.path.basename(filename)
+            filename_without_extension = ".".join(filename_base.split(".")[:-1])
+            fig.savefig(filename_without_extension+"_pulse.png", dpi=150)
+        plt.show()
+
+    elif plots == 3:
+        directory = os.path.dirname(filename)
+        if is_writable(directory):
+            filename_without_extension = ".".join(filename.split(".")[:-1])
+            fig.savefig(filename_without_extension+"_pulse.png", dpi=150)
+        else:
+            print("Warning: Path to datafile not writable, attempting to make plot in current directory")
+            filename_base = os.path.basename(filename)
+            filename_without_extension = ".".join(filename_base.split(".")[:-1])
+            fig.savefig(filename_without_extension+"_pulse.png", dpi=150)
+        plt.close(fig)
+
+    else:
+        plt.show()
+
+def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
+    """
+    Combined Periodic and Single Pulse Search.
+    
+    Runs both standard BLS (periodic) and Pulse Search (single event).
+    Returns the result with the highest SNR.
+    
+    If Pulse Search wins:
+        - Returns a gbls_ans_class object with:
+            - bper = 0 (indicating single event)
+            - epo = pulse t0
+            - tdur = pulse duration
+            - depth = pulse depth
+            - snr = pulse snr
+    
+    If BLS wins:
+        - Returns the standard gbls_ans_class object from bls()
+        
+    Generates a consolidated plot if inputs.plots > 0.
+    """
+    
+    # 1. Run Periodic BLS
+    # Temporarily disable plotting in bls() to handle it here
+    # Force return_spectrum=True so we have data for plotting if needed
+    original_plots = tpy5_inputs.plots
+    original_return_spectrum = getattr(tpy5_inputs, 'return_spectrum', False)
+    
+    tpy5_inputs.plots = 0 
+    tpy5_inputs.return_spectrum = True
+    
+    # Ensure time and flux are loaded if not provided
+    if (time.shape[0] < 2) or (flux.shape[0] < 2):
+        if tpy5_inputs.lcdir == "":
+            filename = tpy5_inputs.filename
+        else:
+            filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+        time, flux = readfile(filename)
+        # Pre-process like bls() does
+        mintime = np.min(time)
+        time = time - mintime
+        flux = flux - np.median(flux)
+    else:
+        # If provided, we still need mintime for plotting if we want to match bls() behavior exactly
+        # But bls() calculates mintime internally. 
+        # If we pass time/flux to bls(), it uses them as is (assuming they are already processed or bls processes them).
+        # bls() does: mintime = np.min(time); time = time - mintime; flux = flux - np.median(flux)
+        # So we should let bls() do its thing, but for pulse search we need the same processed data?
+        # Actually, bls() modifies 'time' and 'flux' local variables, not the passed arrays (unless in-place).
+        # Python arguments are passed by assignment. 'time = time - mintime' creates a new local array.
+        # So the passed 'time' is unchanged.
+        # We should process time/flux here so we pass the SAME data to both searches.
+        mintime = np.min(time)
+        time_proc = time - mintime
+        flux_proc = flux - np.median(flux)
+        
+        # Update: bls() re-calculates mintime and re-centers time/flux. 
+        # If we pass already centered data, mintime=0.
+        # To be safe, let's pass the original data to bls() and let it handle it.
+        # But for pulse search, we need to do the same processing.
+        pass
+
+    # Run BLS
+    bls_ans = bls(tpy5_inputs, time, flux)
+    
+    # Restore inputs settings
+    tpy5_inputs.plots = original_plots
+    tpy5_inputs.return_spectrum = original_return_spectrum
+    
+    # 2. Run Pulse Search
+    # We need to process data for pulse search as bls() does internally
+    # bls() does:
+    mintime = np.min(time)
+    time_proc = time - mintime
+    flux_proc = flux - np.median(flux)
+    
+    # Use parameters from inputs class
+    pulse_res = compute_pulse_search(
+        time_proc, 
+        flux_proc, 
+        min_duration_hours=tpy5_inputs.pulse_min_duration_hours, 
+        max_duration_hours=tpy5_inputs.pulse_max_duration_hours,
+        bin_duration_days=tpy5_inputs.pulse_bin_duration_days
+    )
+    
+    # 3. Compare Results
+    pulse_snr = pulse_res['snr'] if pulse_res is not None else 0.0
+    
+    # Determine winner
+    if bls_ans.snr >= pulse_snr:
+        final_ans = bls_ans
+        is_periodic = True
+    else:
+        # Create answer object for pulse
+        final_ans = gbls_ans_class()
+        final_ans.epo = pulse_res['t0'] # This t0 is relative to time_proc start (0) + mintime?
+        # compute_pulse_search uses time_proc which starts at 0.
+        # Its returned t0 is in that time frame.
+        # bls_ans.epo is also in the shifted time frame (0 to duration).
+        # When plotting, makeplot adds mintime back.
+        
+        final_ans.epo = pulse_res['t0']
+        
+        # Estimate period for single transit
+        rho_star = pval.get_stellar_density(tpy5_inputs.mstar, tpy5_inputs.rstar)
+        P_est, _, _, _ = pval.estimate_single_transit_period(
+            time=time_proc,
+            tdur=pulse_res['duration'],
+            rho_star=rho_star,
+            margin_factor=1.5
+        )
+        final_ans.bper = P_est
+        
+        final_ans.snr = pulse_res['snr']
+        final_ans.tdur = pulse_res['duration']
+        final_ans.depth = -pulse_res['depth']
+        final_ans.bpower = pulse_res['snr'] # Use SNR as power proxy
+        is_periodic = False
+        
+    # 4. Plotting
+    if tpy5_inputs.plots > 0:
+        if tpy5_inputs.lcdir == "":
+            filename = tpy5_inputs.filename
+        else:
+            filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+            
+        Keptime = tpy5_inputs.zerotime
+        
+        if is_periodic:
+            # Use standard makeplot
+            # We need to ensure we have the spectrum data
+            if bls_ans.periods is not None:
+                makeplot(
+                    bls_ans.periods, 
+                    bls_ans.power, 
+                    time_proc, 
+                    flux_proc, 
+                    mintime, 
+                    Keptime, 
+                    bls_ans.epo, 
+                    bls_ans.bper, 
+                    bls_ans.bpower, 
+                    bls_ans.snr, 
+                    bls_ans.tdur, 
+                    bls_ans.depth, 
+                    filename, 
+                    tpy5_inputs.plots
+                )
+        else:
+            # Use new pulse plot
+            makeplot_pulse(
+                time_proc, 
+                flux_proc, 
+                final_ans, 
+                mintime,
+                Keptime,
+                filename, 
+                tpy5_inputs.plots
+            )
+            
+    # Cleanup spectrum if not requested
+    if is_periodic and not original_return_spectrum:
+        bls_ans.periods = None
+        bls_ans.power = None
+        bls_ans.freqs = None
+        
+    return final_ans
 
