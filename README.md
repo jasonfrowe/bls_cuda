@@ -20,7 +20,7 @@ It is recommended to install this package in "editable" mode inside a virtual en
 
 2.  **Install via pip:**
     ```bash
-    pip install -e .
+    pip install .
     ```
 
 ## Features
