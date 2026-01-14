@@ -192,9 +192,6 @@ fig = transitp.plot_lightcurve_summary(phot, bls_ans=gbls_ans, tpy5_inputs=tpy5_
 - Transit closeup shows ±1 duration window around transit center
 - Statistics panel displays period, T0, SNR, duration, and depth
 
-### ⚠️ Deprecation Notice
-**Command Line Usage:** Previous versions of this code allowed for execution via command line scripts. This method is **deprecated**. Please use the Python API as described above.
-
 ## Dependencies
 This package requires the following libraries (installed automatically):
 *   `numpy`
