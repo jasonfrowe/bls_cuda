@@ -5,7 +5,7 @@ from pytfit5.transitmodel import transitModel
 from pytfit5.keplerian import transitDuration
 from pytfit5.effects import ttv_lininterp
 
-def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
+def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1, filename=None):
     """
     Plots a transit model. Assuming time is in days. Set flux=0 for no scatterplot.
 
@@ -94,14 +94,39 @@ def plotTransit(phot, sol, pl_to_plot=1, nintg=41, ntt=-1, tobs=-1, omc=-1):
     y2 = np.max([y2, max(flux)])
 
     mpl.rcParams.update({'font.size': 22}) # Adjust font
+
+    # Generate smooth model for plotting
+    phase_smooth = np.linspace(-1.5*tdur, 1.5*tdur, 1000)
+    # Convert phase (hours) to time (days) relative to t0
+    # phase = (t - t0) * 24
+    # t = phase/24 + t0
+    time_smooth = t0 + phase_smooth/24.0
+    itime_smooth = float(np.median(itime))
+
+    # Save original radii
+    rdr_orig = sol.rdr.copy()
+    # Remove other planets
+    for i in range(sol.npl):
+        if i != pl_to_plot:
+            sol.rdr[i] = 0
+    
+    # Calculate model with no TTVs
+    smooth_model = transitModel(sol, time_smooth, itime=itime_smooth, nintg=nintg, ntt=-1) - zpt
+    
+    # Restore radii
+    sol.rdr = rdr_orig
+
     plt.figure(figsize=(12,6)) # Adjust size of figure
     plt.scatter(phase, fplot, c="blue", s=100.0, alpha=0.35, edgecolors="none") #scatter plot
-    plt.plot(phase_sorted, model_sorted, c="red", lw=3.0)
+    plt.plot(phase_smooth, smooth_model, c="red", lw=3.0)
     plt.xlabel('Phase (hours)') #x-label
     plt.ylabel('Relative Flux') #y-label
     plt.axis((-1.5*tdur, 1.5*tdur, y1, y2))
     plt.tick_params(direction="in")
-    plt.show()
+    if (filename==None):
+        plt.show()
+    else:
+        plt.savefig(filename, dpi=150)
 
 def printParams(sol):
     """
