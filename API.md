@@ -740,6 +740,115 @@ Run MCMC analysis on transit lightcurve.
 
 ---
 
+## Saving and Loading MCMC Results (`pytfit5.tpy5`)
+
+Save and load complete MCMC analysis results to HDF5 files for reproducibility and later analysis.
+
+### Functions
+
+#### `save_mcmc_results(filename, phot, sol, chain, accept, burnin, params_to_fit, x=None, beta=None, serr=None, params=None)`
+
+Save MCMC results and all necessary data to an HDF5 file.
+
+**Parameters:**
+
+- `filename` (str): Output HDF5 filename
+- `phot` (phot_class): Photometry data object
+- `sol` (transit_model_class): Transit model solution object
+- `chain` (np.ndarray): MCMC chain array
+- `accept` (np.ndarray): Acceptance rates array
+- `burnin` (int): Burnin period
+- `params_to_fit` (list of str): List of parameter names that were fit
+- `x` (np.ndarray, optional): Initial parameters for MCMC
+- `beta` (np.ndarray, optional): Initial step sizes for MCMC
+- `serr` (np.ndarray, optional): Error array for solution parameters
+- `params` (list, optional): MCMC configuration parameters
+
+**Saved Data:**
+
+The HDF5 file contains:
+- **Photometry group**: time, flux, ferr, itime, tflag, icut, flux_f
+- **Solution group**: sol_array, err_array (if available), npl
+- **MCMC results group**: chain, accept, burnin, params_to_fit, and optional x, beta, serr, params
+- **Metadata**: creation_date, pytfit5_version
+
+**Example:**
+
+```python
+import pytfit5.transitPy5 as tpy5
+import pytfit5.transitmcmc as tmcmc
+
+# After running MCMC analysis
+chain, accept, burnin = tmcmc.demcmcRoutine(x, beta, phot_cut, sol_a, serr, params, lnprob)
+
+# Save all results
+tpy5.save_mcmc_results(
+    filename='mcmc_results.h5',
+    phot=phot_cut,
+    sol=sol,
+    chain=chain,
+    accept=accept,
+    burnin=burnin,
+    params_to_fit=params_to_fit,
+    x=x,
+    beta=beta,
+    serr=serr,
+    params=params
+)
+```
+
+---
+
+#### `load_mcmc_results(filename)`
+
+Load MCMC results and all necessary data from an HDF5 file.
+
+**Parameters:**
+
+- `filename` (str): Input HDF5 filename
+
+**Returns:**
+
+- `phot` (phot_class): Photometry data object
+- `sol` (transit_model_class): Transit model solution object
+- `chain` (np.ndarray): MCMC chain array
+- `accept` (np.ndarray): Acceptance rates array
+- `burnin` (int): Burnin period
+- `params_to_fit` (list of str): List of parameter names that were fit
+- `metadata` (dict): Dictionary containing optional saved data (x, beta, serr, params)
+
+**Example:**
+
+```python
+import pytfit5.transitPy5 as tpy5
+import pytfit5.transitmcmc as tmcmc
+import pytfit5.transitplot as transitp
+
+# Load saved MCMC results
+phot, sol, chain, accept, burnin, params_to_fit, metadata = tpy5.load_mcmc_results('mcmc_results.h5')
+
+# Extract parameters from the chain
+sol_mcmc = tmcmc.getParams(chain, burnin, sol, params_to_fit)
+
+# Print results
+transitp.printParams(sol_mcmc)
+
+# Plot the transit model
+transitp.plotTransit(phot, sol_mcmc, pl_to_plot=1)
+
+# Continue MCMC if needed (using metadata)
+if 'x' in metadata and 'beta' in metadata:
+    lnprob, x_new, beta_new = tmcmc.genmcmcInput(sol_mcmc, params_to_fit)
+    chain2, accept2, burnin2 = tmcmc.demcmcRoutine(
+        x_new, beta_new, phot, sol_mcmc.to_array(), 
+        sol_mcmc.err_to_array(), metadata['params'], lnprob
+    )
+```
+
+**Note:** Requires `h5py` package. Install with `pip install h5py`.
+
+---
+
 ## Examples
 
 ### Example 1: Basic BLS Search with Period Validation
