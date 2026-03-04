@@ -167,7 +167,7 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 #### BLS Transit Search Parameters
 - `filename` (str, default: "filename.txt"): Lightcurve filename
 - `lcdir` (str, default: ""): Lightcurve directory path
-- `zerotime` (float, default: 0.0): Time offset for epochs
+- `zerotime` (float, default: 0.0): Time offset subtracted from epochs (e.g., set to 1325.0 for TESS data in BTJD format)
 - `freq1` (float, default: -1): Minimum search frequency in cycles/day (auto if -1)
 - `freq2` (float, default: -1): Maximum search frequency in cycles/day (auto if -1)
 - `ofac` (float, default: 8.0): Oversampling factor for frequency grid

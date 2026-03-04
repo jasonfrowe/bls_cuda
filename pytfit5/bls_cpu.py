@@ -1616,6 +1616,9 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
     Generates a consolidated plot if inputs.plots > 0.
     """
     
+    # Extract parameters from inputs (like bls() does)
+    Keptime = tpy5_inputs.zerotime  # Time offset for epoch calculation
+    
     # 1. Run Periodic BLS
     # Temporarily disable plotting in bls() to handle it here
     # Force return_spectrum=True so we have data for plotting if needed

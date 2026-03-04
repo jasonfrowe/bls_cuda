@@ -73,7 +73,7 @@ Unified configuration class for BLS search, detrending, and transit fitting para
 |-----------|------|---------|-------------|
 | `filename` | str | `"filename.txt"` | Input light curve file path |
 | `lcdir` | str | `""` | Light curve directory |
-| `zerotime` | float | `0.0` | Reference time offset (days) |
+| `zerotime` | float | `0.0` | Reference time offset subtracted from epochs (days). Use this to match your time system (e.g., BJD-2457000) |
 | `freq1` | float | `-1` | Minimum search frequency (c/d) |
 | `freq2` | float | `-1` | Maximum search frequency (c/d) |
 | `ofac` | float | `8.0` | Oversampling factor for frequency grid |
