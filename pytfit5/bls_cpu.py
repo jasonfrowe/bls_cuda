@@ -1514,8 +1514,9 @@ def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
     ax1.set_title("Single Pulse Detection")
     
     # Mark the event
-    # ans.epo is in 'time' frame (0-based)
-    t0_plot = ans.epo + mintime - Keptime
+    # ans.epo is already adjusted: pulse_res['t0'] + mintime - Keptime
+    # This matches the x-axis coordinates: time + mintime - Keptime
+    t0_plot = ans.epo
     dur = ans.tdur
     
     ymin, ymax = ax1.get_ylim()
@@ -1688,13 +1689,10 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
     else:
         # Create answer object for pulse
         final_ans = gbls_ans_class()
-        final_ans.epo = pulse_res['t0'] # This t0 is relative to time_proc start (0) + mintime?
-        # compute_pulse_search uses time_proc which starts at 0.
-        # Its returned t0 is in that time frame.
-        # bls_ans.epo is also in the shifted time frame (0 to duration).
-        # When plotting, makeplot adds mintime back.
-        
-        final_ans.epo = pulse_res['t0']
+        # Adjust T0 to match the convention used by periodic BLS
+        # pulse_res['t0'] is in time_proc frame (starting at 0)
+        # Need to add back mintime and subtract Keptime (zerotime)
+        final_ans.epo = pulse_res['t0'] + mintime - Keptime
         
         # Estimate period for single transit
         rho_star = pval.get_stellar_density(tpy5_inputs.mstar, tpy5_inputs.rstar)
