@@ -24,6 +24,50 @@ This package provides tools for transit search and fitting, including Box-Least-
 
 ## Features
 
+### BLS Transit Search
+
+pytfit5 provides **three search modes** for different scenarios:
+
+1. **Periodic Transit Search (`bls`)** - Standard BLS for repeating transits
+   - Searches for periodic signals
+   - Returns period, epoch, duration, depth
+   - Best for: Known repeating planets
+
+2. **Single Event Search (`compute_pulse_search`)** - Fast single-event detection
+   - Searches for one-time events at all times and durations
+   - Much faster than full BLS (~100x speedup)
+   - Best for: Single transits, stellar flares, fast screening
+
+3. **Combined Search (`bls_pulse`)** - Runs both, returns best
+   - Automatically chooses between periodic and single event
+   - Returns whichever has higher SNR
+   - Best for: Exploratory analysis, unknown signal type
+
+**Example:**
+
+```python
+import pytfit5.bls_cpu as gbls
+import pytfit5.transitPy5 as tpy5
+
+# Configure search
+inputs = tpy5.tpy5_inputs_class()
+inputs.freq1 = 1.0 / 60.0  # Search down to 60-day periods
+inputs.freq2 = 2.0
+inputs.pulse_min_duration_hours = 1.0  # For pulse search
+inputs.pulse_max_duration_hours = 8.0
+
+# Run combined search
+result = gbls.bls_pulse(inputs, time, flux)
+
+# Check result type
+if result.bper == 0:
+    print("Single pulse detected!")
+else:
+    print(f"Periodic signal: P = {result.bper:.2f} days")
+```
+
+See [API.md](API.md) for detailed documentation of all three search modes.
+
 ### Synthetic Lightcurve Generation
 Generate realistic synthetic transit lightcurves with configurable stellar noise:
 
@@ -133,6 +177,11 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 - `normalize` (str, default: "iterative_baseline"): BLS normalization method
 - `return_spectrum` (bool, default: False): Return full BLS spectrum arrays
 - `oneoverf_correction` (bool, default: True): Apply 1/f noise correction for long periods
+
+#### Pulse Search Parameters (for single-event detection)
+- `pulse_min_duration_hours` (float, default: 1.0): Minimum event duration to search (hours)
+- `pulse_max_duration_hours` (float, default: 12.0): Maximum event duration to search (hours)
+- `pulse_bin_duration_days` (float, default: 10.0/1440.0): Binning resolution (~10 minutes)
 
 **Example Usage:**
 ```python
