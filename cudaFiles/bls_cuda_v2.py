@@ -674,8 +674,8 @@ def compute_bls(freqs, power, jn1, jn2, time_g, flux_g, const_g, dconst_g):
     n_freqs = len(freqs)
 
     # Define the CUDA block and grid sizes
-    threads_per_block = 128 # make a mulitple of 32
-    blocks_per_grid   = 128 # (n_freqs + (threads_per_block - 1)) // threads_per_block
+    threads_per_block = 128 # 128 threads per block will cooperate on 1 frequency
+    blocks_per_grid   = n_freqs # Exact 1:1 mapping of blocks to frequencies
 
     # Allocate memory on the device
     freqs_g = cuda.to_device(freqs)
@@ -696,8 +696,13 @@ def compute_bls(freqs, power, jn1, jn2, time_g, flux_g, const_g, dconst_g):
 @cuda.jit
 def bls_kernel(time_g, flux_g, const_g, dconst_g, freqs_g, power_g, jn1_g, jn2_g):
 
-    start = cuda.grid(1)      # 1 = one dimensional thread grid, returns a single value
-    stride = cuda.gridsize(1) # 
+    nk = cuda.blockIdx.x      # Each block perfectly maps to 1 frequency
+    tx = cuda.threadIdx.x     # Local thread ID (0-127)
+    bdim = cuda.blockDim.x    # Total threads in block (128)
+    
+    # Boundary check (in case n_freqs isn't perfectly matched, though here it is)
+    if nk >= freqs_g.shape[0]:
+        return
 
     nb1 = const_g[0] - 1  # nb - 1
     nb  = const_g[0]      # nb
@@ -717,97 +722,119 @@ def bls_kernel(time_g, flux_g, const_g, dconst_g, freqs_g, power_g, jn1_g, jn2_g
 
     qfac = pifac * Rstar*Rsun / (G*Mstar*Msun)**(1.0/3.0)
 
-    # Use shared memory for ibi and y. One copy per block!
-    # Because nb is dynamic (up to 2000 in bls()), we allocate enough for the max
-    # size of 4096 (which covers `nb*2`).
-    ibi = cuda.shared.array(4096, dtype=np.int32)
-    y   = cuda.shared.array(4096, dtype=np.float64)
+    # Use true shared memory to bin the folded lightcurve.
+    # We allocate 2048 which covers the requested nb up to 2000 comfortably 
+    # and keeps us under the 48KB static shared memory limits of Pascal/Turing.
+    ibi = cuda.shared.array(2048, dtype=np.int32)
+    y   = cuda.shared.array(2048, dtype=np.float64)
     
-    # We only need ONE thread in the block to populate the shared array to save 
-    # npt memory operations per-thread (which is enormous).
-    tx = cuda.threadIdx.x
-    if tx == 0:
-        freq = freqs_g[start] # Arbitrary frequency for phase binning approximation 
-                           # Note: This changes the numerical behavior slightly 
-                           # if freqs_g[nk] varies drastically across the block,
-                           # but in BLS sweeps df is tiny so the binning is practically identical.
-                           
-        for i in range(nb):
-            ibi[i] = 0
-            y[i]   = 0.0
-        
-        for i in range(npt):
-            phase = time_g[i]*freq - int(time_g[i]*freq)
-            j = int(phase * nb1)
-    
-            ibi[j] += 1
-            y[j]   += flux_g[i]
-    
-        #duplicate array
-        for i in range(nb):
-            ibi[i + nb] = ibi[i]
-            y[i + nb]   = y[i]
+    # Thread block reduction arrays
+    best_p_shared = cuda.shared.array(128, dtype=np.float64)
+    best_i_shared = cuda.shared.array(128, dtype=np.int32)
+    best_j_shared = cuda.shared.array(128, dtype=np.int32)
+
+    # 1. Initialize Shared Memory collaboratively across the block
+    for i in range(tx, nb, bdim):
+        iby = 0
+        yy = 0.0
+        if i < 2048:
+            ibi[i] = iby
+            y[i]   = yy
             
-    # Sync all threads in the block to ensure shared memory is populated
     cuda.syncthreads()
 
-    for nk in range(start, freqs_g.shape[0], stride):
-            
-        freq = freqs_g[nk]
-        fsec = freq / day2sec
-        ohf = onehour*freq
-        q = qfac * fsec**(2.0/3.0)
+    freq = freqs_g[nk]
+    fsec = freq / day2sec
+    ohf = onehour*freq
+
+    # 2. Phase fold collaboratively 
+    # Use grid stride loop across npt, atomically add to shared memory
+    for i in range(tx, npt, bdim):
+        phase = time_g[i]*freq - int(time_g[i]*freq)
+        j = int(phase * nb1)
+        cuda.atomic.add(ibi, j, 1)        # Because this is SHARED memory, atomics are fast!
+        cuda.atomic.add(y, j, flux_g[i])
+
+    cuda.syncthreads()
+
+    q = qfac * fsec**(2.0/3.0)
+
+    qmi = q / 2.0
+    if qmi < ohf:
+        qmi = ohf
+
+    qma = q * 2.0
+    if qma > 0.25:
+        qma = 0.25
+
+    if qmi > qma:
+        qma = qmi * 2.0
+        if qma > 0.4:
+            qma = 0.4
+
+    kmi = int(qmi * nb)
+    if kmi < 1:
+        kmi = 1
+    kma = int(qma * nb) + 1
+    kkmi = int(npt * qmi)
+    if kkmi < 5: #minbin
+        kkmi = 5
+    nbkma = nb + kma
+
+    best_power = 0.0
+    best_i = -1
+    best_j = -1
+
+    # 4. Search bins collaboratively (dividing 'i' loop space amongst the 128 threads)
+    for i in range(tx, nb, bdim):
+        s = 0.0
+        k = 0
+        kk = 0
+        nb2 = i + kma + 1
+
+        for j in range(i, nb2):
+            # Phase wrap via modulo operator instead of duplicate arrays
+            wrap_j = j
+            if wrap_j >= nb:
+                wrap_j -= nb
+                
+            k  = k + 1
+            kk = kk + ibi[wrap_j]
+            s  = s  + y[wrap_j]
+
+            if k > kmi and kk > kkmi:
+                dfac = (kk * (npt - kk)) #const[1] = npt
+                if dfac > 0 :
+                    pow1 = s * s / dfac
+                    if pow1 > best_power:
+                        best_power = pow1
+                        best_i = i
+                        best_j = j
+                        
+    # 5. Parallel Block Reduction 
+    best_p_shared[tx] = best_power
+    best_i_shared[tx] = best_i
+    best_j_shared[tx] = best_j
     
-        qmi = q / 2.0
-        if qmi < ohf:
-            qmi = ohf
+    cuda.syncthreads()
     
-        qma = q * 2.0
-        if qma > 0.25:
-            qma = 0.25
-    
-        if qmi > qma:
-            qma = qmi * 2.0
-            if qma > 0.4:
-                qma = 0.4
-    
-        kmi = int(qmi * nb)
-        if kmi < 1:
-            kmi = 1
-        kma = int(qma * nb) + 1
-        kkmi = int(npt * qmi)
-        if kkmi < 5: #minbin
-            kkmi = 5
-        nbkma = nb + kma
-    
-        best_power = 0.0
-        best_i = -1
-        best_j = -1
-    
-        for i in range(nb):
-            s = 0.0
-            k = 0
-            kk = 0
-            nb2 = i + kma + 1
-    
-            for j in range(i, nb2):
-                k  = k + 1
-                kk = kk + ibi[j]
-                s  = s  + y[j]
-    
-                if k > kmi and kk > kkmi:
-                    dfac = (kk * (npt - kk)) #const[1] = npt
-                    if dfac > 0 :
-                        pow1 = s * s / dfac
-                        if pow1 > best_power:
-                            best_power = pow1
-                            best_i = i
-                            best_j = j
-                            
-        if best_power > 0.0:
-            power_g[nk] = best_power
-            jn1_g[nk] = best_i
-            jn2_g[nk] = best_j
+    # We do a simple tree reduction on the 128 elements inside Shared Memory to find the absolute max for this block (frequency)
+    stride = bdim // 2
+    while stride > 0:
+        if tx < stride:
+            if best_p_shared[tx + stride] > best_p_shared[tx]:
+                best_p_shared[tx] = best_p_shared[tx + stride]
+                best_i_shared[tx] = best_i_shared[tx + stride]
+                best_j_shared[tx] = best_j_shared[tx + stride]
+        stride = stride // 2
+        cuda.syncthreads()
+
+    # Thread 0 writes the absolute result to the Global Array for this frequency
+    if tx == 0:
+        if best_p_shared[0] > 0.0:
+            power_g[nk] = best_p_shared[0]
+            jn1_g[nk] = best_i_shared[0]
+            jn2_g[nk] = best_j_shared[0]
 
 
 
