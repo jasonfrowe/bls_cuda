@@ -19,3 +19,7 @@
 
 ## 4. Jupyter Notebook Benchmarking
 * **Enhancement**: Added `%%time` commands inside `bls_cuda_v2.ipynb` to easily track Wall Time for performance evaluations.
+
+## 5. Phase 3 Precision Limits (`bls_cuda_v2_f32.py`)
+* **Experiment**: The GTX 1080 Ti operates FP32 math up to 32x faster than FP64 math. Created a dedicated clone `bls_cuda_v2_f32.py` enforcing strictly 32-bit float memory pipelines and math constraints across the board to measure precision decay on transit SNR.
+* **Findings**: Signal-to-Noise Ratio (SNR) for both TESS and Kepler algorithms degraded by exactly `0.000` down to the third decimal place. The peak `power` scalar shifted by `< 0.1%`. Speedup varied heavily (1.44x faster on TESS data, only 1.04x faster on Kepler data) pointing to a primary Global-Memory-Bandwidth loading bottleneck over a true mathematics bottleneck.
