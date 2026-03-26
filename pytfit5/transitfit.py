@@ -4,6 +4,13 @@ import pytfit5.transitmodel as transitm
 import pytfit5.transitPy5 as tpy5
 import pytfit5.bls_cpu as gbls
 
+
+def _coerce_array(values, dtype):
+    array = np.asarray(values, dtype=dtype)
+    if not array.flags.c_contiguous:
+        array = np.ascontiguousarray(array)
+    return array
+
 def analyseLightCurve(gbls_inputs):
     """
     Function to call to analyse a light curve and get the best-fit parameters
@@ -112,15 +119,20 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
         ntt = np.zeros(n_planet, dtype="int32") # Number of TTVs measured 
         tobs = np.zeros((n_planet, nb_pts)) # Time stamps of TTV measurements (days)
         omc = np.zeros((n_planet, nb_pts)) # TTV measurements (O-C) (days)
+    else:
+        ntt = _coerce_array(ntt, np.int32)
+        tobs = _coerce_array(tobs, np.float64)
+        omc = _coerce_array(omc, np.float64)
 
     # Read phot class
-    time = phot.time[(phot.icut == 0) & (phot.tflag == 1)]
-    flux = phot.flux_f[(phot.icut == 0) & (phot.tflag == 1)] # - np.median(phot.flux) + 1
-    ferror = phot.ferr[(phot.icut == 0) & (phot.tflag == 1)]
-    itime = phot.itime[(phot.icut == 0) & (phot.tflag == 1)]
+    selection = (phot.icut == 0) & (phot.tflag == 1)
+    time = _coerce_array(phot.time[selection], np.float64)
+    flux = _coerce_array(phot.flux_f[selection], np.float64) # - np.median(phot.flux) + 1
+    ferror = _coerce_array(phot.ferr[selection], np.float64)
+    itime = _coerce_array(phot.itime[selection], np.float64)
     
     # Transform solution object to array
-    sol = sol_obj.to_array()
+    sol = _coerce_array(sol_obj.to_array(), np.float64)
 
     log_space_params = np.array([transitm.var_to_ind["rho"], transitm.var_to_ind["rdr"]]) # Rho and Rp/Rs are in log space
     id_to_fit = np.array([transitm.var_to_ind[param] for param in params_to_fit])
@@ -154,7 +166,7 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
             sol[i] = np.log(sol[i])
 
 
-    res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
+    res = least_squares(wrapperTransit, _coerce_array(sol[id_to_fit], np.float64), bounds=bounds, \
                         args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc))
 
     # res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \

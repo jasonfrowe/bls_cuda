@@ -6,6 +6,38 @@ import pytfit5.transitPy5 as tpy5
 import time
 
 
+DSCALE_PARAM = "dscale"
+DSCALE_LOG_BOUNDS = (np.log(1.0e-6), np.log(1.0e3))
+DSCALE_DEFAULT = 1.0
+DSCALE_DEFAULT_ERROR = 0.01
+
+
+def _get_fit_parameter_layout(sol, params_to_fit):
+    id_to_fit = np.array([transitm.var_to_ind[param] for param in params_to_fit if param != DSCALE_PARAM], dtype=int)
+    log_space_params = np.array([transitm.var_to_ind["rho"], transitm.var_to_ind["rdr"]], dtype=int)
+    fit_dscale = DSCALE_PARAM in params_to_fit
+
+    # Expand indices arrays to fit multiple planets
+    for i in range(sol.npl - 1):
+        mask = (id_to_fit >= transitm.nb_st_param) & (id_to_fit < (transitm.nb_pl_param + transitm.nb_st_param))
+        id_to_fit = np.append(id_to_fit, id_to_fit[mask] + (i + 1) * transitm.nb_pl_param)
+
+        mask_log = (log_space_params >= transitm.nb_st_param) & (log_space_params < (transitm.nb_pl_param + transitm.nb_st_param))
+        log_space_params = np.append(log_space_params, log_space_params[mask_log] + (i + 1) * transitm.nb_pl_param)
+
+    return id_to_fit, log_space_params, fit_dscale
+
+
+def _get_dscale_values(sol):
+    dscale = getattr(sol, DSCALE_PARAM, DSCALE_DEFAULT)
+    ddscale = getattr(sol, "d" + DSCALE_PARAM, DSCALE_DEFAULT_ERROR)
+    if dscale <= 0:
+        dscale = DSCALE_DEFAULT
+    if ddscale <= 0:
+        ddscale = DSCALE_DEFAULT_ERROR
+    return dscale, ddscale
+
+
 def setup_priors(sol):
     """
     Builds the lower and upper bound arrays for the priors.
@@ -44,16 +76,7 @@ def genmcmcInput(sol, params_to_fit):
 
     return: New log prob function, Array of initial parameters to pass to mcmc, Initial guess for beta using errors
     """
-    id_to_fit = np.array([transitm.var_to_ind[param] for param in params_to_fit])
-    log_space_params = np.array([transitm.var_to_ind["rho"], transitm.var_to_ind["rdr"]]) # Rho and Rp/Rs are in log space
-
-    # Expand indices arrays to fit multiple planets
-    for i in range(sol.npl - 1):
-        mask = (id_to_fit >= transitm.nb_st_param) & (id_to_fit < (transitm.nb_pl_param + transitm.nb_st_param))
-        id_to_fit = np.append(id_to_fit, id_to_fit[mask] + (i+1)*transitm.nb_pl_param)
-
-        mask_log = (log_space_params >= transitm.nb_st_param) & (log_space_params < (transitm.nb_pl_param + transitm.nb_st_param))
-        log_space_params = np.append(log_space_params, log_space_params[mask_log] + (i+1)*transitm.nb_pl_param)
+    id_to_fit, log_space_params, fit_dscale = _get_fit_parameter_layout(sol, params_to_fit)
 
     sol_a = sol.to_array()
 
@@ -63,7 +86,15 @@ def genmcmcInput(sol, params_to_fit):
                 sol_a[ind] = np.exp(fit_sol[i])
             else:
                 sol_a[ind] = fit_sol[i]
-        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds)
+
+        if fit_dscale:
+            if not DSCALE_LOG_BOUNDS[0] <= fit_sol[len(id_to_fit)] <= DSCALE_LOG_BOUNDS[1]:
+                return -np.inf
+            dscale = np.exp(fit_sol[len(id_to_fit)])
+        else:
+            dscale = DSCALE_DEFAULT
+
+        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=dscale)
     
     err_a = sol.err_to_array()
 
@@ -72,8 +103,16 @@ def genmcmcInput(sol, params_to_fit):
         if i in id_to_fit:
             err_a[i] = err_a[i]/sol_a[i] # Error on f=ln(x) is error(x)/x
             sol_a[i] = np.log(sol_a[i])
-    
-    return newLogprob, sol_a[id_to_fit], err_a[id_to_fit]
+
+    x = np.array(sol_a[id_to_fit], dtype=np.float64)
+    beta = np.array(err_a[id_to_fit], dtype=np.float64)
+
+    if fit_dscale:
+        dscale, ddscale = _get_dscale_values(sol)
+        x = np.append(x, np.log(dscale))
+        beta = np.append(beta, ddscale / dscale)
+
+    return newLogprob, x, beta
 
 def getParams(chain, burnin, sol, params_to_fit):
     """
@@ -85,16 +124,7 @@ def getParams(chain, burnin, sol, params_to_fit):
     std = np.std(cut_chain, axis=0)
 
     # Return to the full array
-    id_to_fit = np.array([transitm.var_to_ind[param] for param in params_to_fit])
-    log_space_params = np.array([transitm.var_to_ind["rho"], transitm.var_to_ind["rdr"]])
-
-    # Expand indices arrays for multiple planets
-    for i in range(sol.npl - 1):
-        mask = (id_to_fit >= transitm.nb_st_param) & (id_to_fit < (transitm.nb_pl_param + transitm.nb_st_param))
-        id_to_fit = np.append(id_to_fit, id_to_fit[mask] + (i+1)*transitm.nb_pl_param)
-
-        mask_log = (log_space_params >= transitm.nb_st_param) & (log_space_params < (transitm.nb_pl_param + transitm.nb_st_param))
-        log_space_params = np.append(log_space_params, log_space_params[mask_log] + (i+1)*transitm.nb_pl_param)
+    id_to_fit, log_space_params, fit_dscale = _get_fit_parameter_layout(sol, params_to_fit)
 
     sol_full = sol.to_array()
     err_full = np.zeros(len(sol_full))
@@ -110,6 +140,14 @@ def getParams(chain, burnin, sol, params_to_fit):
     sol_output = transitm.transit_model_class()
     sol_output.from_array(sol_full)
     sol_output.load_errors(err_full)
+
+    if fit_dscale:
+        dscale_index = len(id_to_fit)
+        sol_output.dscale = np.exp(mm[dscale_index])
+        sol_output.ddscale = np.exp(mm[dscale_index]) * std[dscale_index]
+    else:
+        sol_output.dscale = getattr(sol, DSCALE_PARAM, DSCALE_DEFAULT)
+        sol_output.ddscale = getattr(sol, "d" + DSCALE_PARAM, 0.0)
 
     return sol_output
 
@@ -138,10 +176,10 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 
 # def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
 #     return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
-def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds):
+def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=DSCALE_DEFAULT):
     # The loglikehood call stays exactly the same for now
     # print("sol_a:", sol)
-    ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc)
+    ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, dscale=dscale)
     if np.isnan(ll):
         ll = -1.0e30
     
@@ -154,7 +192,10 @@ def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubou
     
     return ll + lp
 
-def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
+def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, dscale=DSCALE_DEFAULT):
+
+    if not np.isfinite(dscale) or dscale <= 0:
+        return -1.0e30
 
     model = modelFunc(sol, time, itime, nintg, ntt, tobs, omc)
 
@@ -163,7 +204,8 @@ def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc
     if n < 1:
         ll = -1e30
     else:
-        ll = -0.5*(n*np.log(2*np.pi) + np.sum(np.log(ferror*ferror) + ((flux - model)/ferror)**2))
+        variance = ferror * ferror * dscale * dscale
+        ll = -0.5 * (n * np.log(2 * np.pi) + np.sum(np.log(variance) + ((flux - model) * (flux - model) / variance)))
 
     return ll
 
@@ -191,6 +233,23 @@ def logprior(sol,lbounds,ubounds):
             continue
         else:
             return badprior
+
+    # Joint (b, k) prior:
+    #   - Hard bound: b >= 1 + k means no transit chord exists (geometrically impossible) -> -inf
+    #   - Soft penalty: once in the grazing zone (b > 1-k), apply a Gaussian penalty
+    #     whose width is scaled by k so that large planets tolerate more grazing than small ones.
+    for i in range(npl):
+        b   = sol[transitm.nb_st_param + 2 + i * transitm.nb_pl_param]  # bb
+        rdr = sol[transitm.nb_st_param + 3 + i * transitm.nb_pl_param]  # r/R*
+
+        # Hard bound: transit chord length = sqrt((1+k)^2 - b^2) becomes imaginary
+        if b >= 1.0 + rdr:
+            return badprior
+
+        # Soft penalty in the grazing zone, width proportional to k
+        grazing_excess = b - (1.0 - rdr)
+        if grazing_excess > 0.0 and rdr > 0.0:
+            lprior += -(grazing_excess / rdr) ** 2
 
     return lprior
 

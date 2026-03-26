@@ -1712,6 +1712,11 @@ def save_mcmc_results(filename, phot, sol, chain, accept, burnin, params_to_fit,
             sol_group.create_dataset('err_array', data=err_array)
         except AttributeError:
             pass
+
+        if hasattr(sol, 'dscale'):
+            sol_group.attrs['dscale'] = sol.dscale
+        if hasattr(sol, 'ddscale'):
+            sol_group.attrs['ddscale'] = sol.ddscale
         
         # Save MCMC results
         mcmc_group = f.create_group('mcmc_results')
@@ -1804,6 +1809,10 @@ def load_mcmc_results(filename):
         if 'err_array' in f['solution']:
             err_array = f['solution/err_array'][:]
             sol.load_errors(err_array)
+        if 'dscale' in f['solution'].attrs:
+            sol.dscale = f['solution'].attrs['dscale']
+        if 'ddscale' in f['solution'].attrs:
+            sol.ddscale = f['solution'].attrs['ddscale']
         
         # Load MCMC results
         chain = f['mcmc_results/chain'][:]

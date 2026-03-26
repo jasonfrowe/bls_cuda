@@ -140,6 +140,9 @@ def printParams(sol):
         "Dilution": "dil", "Velocity Offset": "vof", "Photometric zero point": "zpt"
     }
 
+    if hasattr(sol, "dscale"):
+        stellarDict["Error scale factor"] = "dscale"
+
     planetDict = {
         "t0 (days)": "t0", "Period (days)": "per", "Impact parameter": "bb", "Rp/R*": "rdr",
         "sqrt(e)cos(w)": "ecw", "sqrt(e)sin(w)": "esw", "RV Amplitude (m/s)": "krv",
