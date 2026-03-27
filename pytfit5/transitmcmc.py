@@ -7,9 +7,111 @@ import time
 
 
 DSCALE_PARAM = "dscale"
-DSCALE_LOG_BOUNDS = (np.log(1.0e-6), np.log(1.0e3))
+DSCALE_LOG_BOUNDS = (np.log(1.0e-6), np.log(10.0))   # dscale in (0, 10]; initial default = 1.0
 DSCALE_DEFAULT = 1.0
 DSCALE_DEFAULT_ERROR = 0.01
+
+
+class priors_class:
+    """
+    Optional Gaussian (split-normal) soft priors for any transit model parameter.
+
+    Stellar parameters (scalars): set as [mean, sigma_up, sigma_lo]
+        priors.rho  = [1.5, 0.3, 0.3]
+        priors.nl3  = [0.367, 0.007, 0.007]
+
+    Planet parameters: set as a list of [mean, sigma_up, sigma_lo] per planet, or
+    a single [mean, sigma_up, sigma_lo] applied to all planets.
+        priors.bb   = [[0.3, 0.2, 0.2], None]   # Prior on planet 1; no prior on planet 2
+        priors.rdr  = [[0.1, 0.02, 0.02]]        # Single planet
+        priors.per  = [3.0, 0.01, 0.01]          # Same prior applied to all planets
+
+    All attributes default to None (no prior).
+    sigma_up and sigma_lo must be > 0; a zero or negative sigma silently skips that term.
+    """
+    def __init__(self):
+        # Stellar parameters (scalar)
+        self.rho = None
+        self.nl1 = None
+        self.nl2 = None
+        self.nl3 = None
+        self.nl4 = None
+        self.dil = None
+        self.vof = None
+        self.zpt = None
+        # Planet parameters (list of priors per planet, or a single spec for all planets)
+        self.t0  = None
+        self.per = None
+        self.bb  = None
+        self.rdr = None
+        self.ecw = None
+        self.esw = None
+        self.krv = None
+        self.ted = None
+        self.ell = None
+        self.alb = None
+
+
+_ST_PARAM_NAMES = ["rho", "nl1", "nl2", "nl3", "nl4", "dil", "vof", "zpt"]
+_PL_PARAM_NAMES = ["t0", "per", "bb", "rdr", "ecw", "esw", "krv", "ted", "ell", "alb"]
+
+
+def _gaussian_prior_contribution(value, spec):
+    """
+    Split-normal log prior contribution.  spec = [mean, sigma_up, sigma_lo].
+    Returns 0.0 for a None spec or non-positive sigma.
+    """
+    if spec is None:
+        return 0.0
+    mean, sig_up, sig_lo = spec
+    residual = value - mean
+    sigma = sig_up if residual >= 0 else sig_lo
+    if sigma <= 0:
+        return 0.0
+    return -0.5 * (residual / sigma) ** 2
+
+
+def _apply_gaussian_priors(sol, priors):
+    """
+    Sum Gaussian prior contributions across all parameters.
+
+    sol: flat parameter array in natural (linear) units.
+    priors: priors_class instance, or None.  Returns 0.0 immediately if None.
+
+    For planet parameters, spec_all can be:
+      - None                      -> no prior
+      - [mean, sig_up, sig_lo]    -> same prior applied to every planet
+      - [[mean, sig_up, sig_lo],
+         None, ...]               -> per-planet specs (None = no prior for that planet)
+    """
+    if priors is None:
+        return 0.0
+
+    lp = 0.0
+
+    # Stellar scalar parameters (indices 0-7)
+    for k, name in enumerate(_ST_PARAM_NAMES):
+        spec = getattr(priors, name, None)
+        lp += _gaussian_prior_contribution(sol[k], spec)
+
+    # Planet parameters
+    npl = (len(sol) - transitm.nb_st_param) // transitm.nb_pl_param
+    for i in range(npl):
+        for j, name in enumerate(_PL_PARAM_NAMES):
+            spec_all = getattr(priors, name, None)
+            if spec_all is None:
+                continue
+            # Detect per-planet list-of-lists vs. a single [mean, s+, s-] for all planets.
+            # spec_all[0] is a sequence only for the nested (per-planet) case.
+            try:
+                len(spec_all[0])
+                spec = spec_all[i] if i < len(spec_all) else None
+            except TypeError:
+                spec = spec_all
+            idx = transitm.nb_st_param + i * transitm.nb_pl_param + j
+            lp += _gaussian_prior_contribution(sol[idx], spec)
+
+    return lp
 
 
 def _get_fit_parameter_layout(sol, params_to_fit):
@@ -67,12 +169,13 @@ def setup_priors(sol):
     return lbounds, ubounds
 
 
-def genmcmcInput(sol, params_to_fit):
+def genmcmcInput(sol, params_to_fit, priors=None):
     """
     Returns the new log function, the sol array and the beta array to use for mcmc
 
     sol: Transit Model object containing the initial parameters
     params_to_fit: List containing strings of the names of the parameters to fit according to the tm class
+    priors: Optional priors_class instance with Gaussian soft priors for any parameter. Defaults to None.
 
     return: New log prob function, Array of initial parameters to pass to mcmc, Initial guess for beta using errors
     """
@@ -94,7 +197,7 @@ def genmcmcInput(sol, params_to_fit):
         else:
             dscale = DSCALE_DEFAULT
 
-        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=dscale)
+        return logprob(sol_a, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=dscale, priors=priors)
     
     err_a = sol.err_to_array()
 
@@ -176,7 +279,7 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 
 # def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
 #     return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
-def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=DSCALE_DEFAULT):
+def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=DSCALE_DEFAULT, priors=None):
     # The loglikehood call stays exactly the same for now
     # print("sol_a:", sol)
     ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, dscale=dscale)
@@ -184,7 +287,7 @@ def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubou
         ll = -1.0e30
     
     # The logprior call now passes the pre-built bounds instead of the 'time' array
-    lp = logprior(sol, lbounds, ubounds)
+    lp = logprior(sol, lbounds, ubounds, priors=priors)
     # if np.isinf(lp):
     #     lp = 0
 
@@ -209,7 +312,7 @@ def loglikehood(modelFunc, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc
 
     return ll
 
-def logprior(sol,lbounds,ubounds):
+def logprior(sol, lbounds, ubounds, priors=None):
     badprior = -np.inf
     lprior = 0
 
@@ -250,6 +353,8 @@ def logprior(sol,lbounds,ubounds):
         grazing_excess = b - (1.0 - rdr)
         if grazing_excess > 0.0 and rdr > 0.0:
             lprior += -(grazing_excess / rdr) ** 2
+
+    lprior += _apply_gaussian_priors(sol, priors)
 
     return lprior
 

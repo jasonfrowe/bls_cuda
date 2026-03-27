@@ -365,18 +365,22 @@ def calculate_reduced_chisq_and_error_scale(sol_obj, phot, nintg=41, ntt=-1, tob
         ntt = np.zeros(n_planet, dtype="int32")
         tobs = np.zeros((n_planet, nb_pts))
         omc = np.zeros((n_planet, nb_pts))
+    else:
+        ntt = _coerce_array(ntt, np.int32)
+        tobs = _coerce_array(tobs, np.float64)
+        omc = _coerce_array(omc, np.float64)
     
     # Apply the SAME data cuts as fitTransitModel
     mask = (phot.icut == 0) & (phot.tflag == 1)
-    time = phot.time[mask]
-    flux = phot.flux_f[mask]
-    ferror = phot.ferr[mask]
-    itime = phot.itime[mask]
+    time = _coerce_array(phot.time[mask], np.float64)
+    flux = _coerce_array(phot.flux_f[mask], np.float64)
+    ferror = _coerce_array(phot.ferr[mask], np.float64)
+    itime = _coerce_array(phot.itime[mask], np.float64)
     
     n_data = len(time)
     
     # Convert solution object to array
-    sol = sol_obj.to_array()
+    sol = _coerce_array(sol_obj.to_array(), np.float64)
     
     # Calculate the model
     y_model = transitm._transitModel(sol, time, itime, nintg, ntt, tobs, omc)
