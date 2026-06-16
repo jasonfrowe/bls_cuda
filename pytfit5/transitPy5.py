@@ -16,6 +16,10 @@ import matplotlib.pyplot as plt  #MatPlotLib for some simple plots
 
 from scipy import stats #For Kernel Density Estimation
 
+# Handle the NumPy 1.x to 2.0 trapezoid rename seamlessly.
+if not hasattr(np, 'trapezoid'):
+    np.trapezoid = np.trapz
+
 # Nice for keeping an eye on progress.
 from tqdm import trange
 
