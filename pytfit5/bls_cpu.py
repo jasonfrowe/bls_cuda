@@ -81,7 +81,7 @@ def readfile(filename):
     
     return time, flux# , ferr, itime
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def nyquest_cpu(time):
 
     dt = np.zeros((time.shape[0]))
@@ -94,7 +94,7 @@ def nyquest_cpu(time):
 
     return nyq
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def qfunc_cpu(f, Mstar, Rstar):
     '''Calculates optimal phase for circular orbit
     '''
@@ -105,7 +105,7 @@ def qfunc_cpu(f, Mstar, Rstar):
 
     return q
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -122,7 +122,7 @@ def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
     return nstep
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -147,7 +147,7 @@ def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, m
         f = f + df   #next frequency to scan
     return freqs
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_stats(epo, period, tdur, npt, time, flux):
     # Import necessary libraries if not already imported (e.g., NumPy)
 
@@ -475,7 +475,7 @@ def interpolate_std(b_std, b_cen, freq):
     interp_std[interp_std == 0] = np.nanmean(interp_std)
     return interp_std
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def running_std_with_filter(data, half_window):
     # Calculate the overall standard deviation
     std = np.std(data)
@@ -1110,8 +1110,8 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     else: 
         # Store our answers
-        max_processes = os.cpu_count()
-        ndiv = nstep // (max_processes - 1) + 1
+        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  # CPUs this process may use (respects Slurm), not the whole node
+        ndiv = nstep // max_processes + 1
         
         p   = np.zeros((max_processes, ndiv))
         jn1 = np.zeros((max_processes, ndiv), dtype=np.int32)
@@ -1177,7 +1177,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     
 #     return p, jn1, jn2
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_pulse_kernel(flux_binned, counts_binned, widths, sigma):
     """
     Scans for single pulses. Returns the Signal-to-Noise Ratio (SNR).
@@ -1294,7 +1294,7 @@ def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=
 
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
     """
     BLS kernel optimized for single event searches (Period > Duration).
@@ -1412,7 +1412,7 @@ def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
         
     return p, jn1, jn2
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
 
     npt = time.shape[0]

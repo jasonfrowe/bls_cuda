@@ -1,7 +1,7 @@
 import numpy as np
 from numba import njit
 
-@njit
+@njit(cache=True)
 def ellK(k):
     """
     Computes the elliptic integral of the first kind (Hasting's approximation)
@@ -23,7 +23,7 @@ def ellK(k):
 
     return ek1 - ek2
 
-@njit
+@njit(cache=True)
 def ellE(k):
     """
     Computes the elliptic integral of the second kind (Hasting's approximation)
@@ -44,7 +44,7 @@ def ellE(k):
     
     return ee1 - ee2
 
-@njit
+@njit(cache=True)
 def ellPi(n, k):
     """
     Calculates the elliptic integral of the third kind taken from Bulirsch (1965)

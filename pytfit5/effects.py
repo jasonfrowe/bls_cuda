@@ -1,7 +1,7 @@
 import numpy as np
 from numba import njit
 
-@njit
+@njit(cache=True)
 def albedoMod(phi, ag):
     phi = phi + np.pi
     if phi > 2*np.pi:
@@ -16,7 +16,7 @@ def albedoMod(phi, ag):
       
     return ag * phase
 
-@njit
+@njit(cache=True)
 def ttv_lininterp(x, y, ntt, xin, npl):
     """
     Calculates a linear interpolation of xin.

@@ -40,7 +40,7 @@ def get_stellar_density(mass_solar, radius_solar):
     
     return density / 1000.0
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def compute_transit_snr(time, flux, t0, period, tdur, n_dur=1.5):
     """
     Compute SNR for a given period and epoch by identifying in-transit points.
