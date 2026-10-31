@@ -585,6 +585,9 @@ class tpy5_inputs_class:
         self.ofac     = 8.0             # Oversampling factor
         self.nper     = 50000           # Number of periods (deprecated, auto-calculated)
         self.minbin   = 5               # Minimum number of bins in transit
+        self.nbins    = 2000            # Number of phase bins in BLS (capped at npt-1)
+        self.max_bin_minutes = 0.0      # If > 0: widest allowed phase bin [minutes]; at long periods
+                                        # nb grows to max(nbins, P/max_bin_minutes). 0 = fixed nbins
         self.plots    = 1               # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1               # 0 = single thread, 1 = multiprocessing
         self.normalize = "iterative_baseline"  # BLS normalization: none, mad, percentile_mad, coverage_mad, iterative_baseline

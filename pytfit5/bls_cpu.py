@@ -985,6 +985,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     bpower = power[psort[-1]]     #Power of best event
     bper   = periods[psort[-1]]   #Period of best event
     
+    if np.ndim(nb) > 0:           # per-frequency number of bins: use the best frequency's
+        nb = nb[psort[-1]]
     in1   = jn1[psort[-1]]        #start of ingress (based on BLS, so there is will be some error)
     in2   = jn2[psort[-1]]        #end of egress 
 
@@ -1069,6 +1071,8 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     minbin   = tpy5_inputs.minbin
     nper     = tpy5_inputs.nper
     multipro = tpy5_inputs.multipro
+    nbins    = getattr(tpy5_inputs, "nbins", 2000)
+    max_bin_minutes = getattr(tpy5_inputs, "max_bin_minutes", 0.0)
     
     if (time.shape[0] < 2) or (flux.shape[0] < 2):
         time, flux = readfile(filename)
@@ -1079,7 +1083,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     flux = flux - np.median(flux)  #flux is centred around 0
 
     npt   = time.shape[0]                     #number of data points
-    nb    = np.min((2000, time.shape[0]-1.0)) #npt - 1, sets how the data in binned in phase.
+    nb    = np.min((nbins, time.shape[0]-1.0)) #npt - 1, sets how the data in binned in phase.
     nyq   = nyquest_cpu(time)            #nyquest [c/d] -- CPU seems to be faster x2 for 1080ti vs 10700
     mint  = np.min(time)                      #minimum time [d]
     maxt  = np.max(time)                      #max time [d]
@@ -1129,6 +1133,12 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     #Calculate the frequencies that we will be folding at
     freqs = calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
+    # Number of phase bins for each frequency: fixed nb, or (max_bin_minutes > 0)
+    # grown at long periods so a bin is never wider than max_bin_minutes.
+    nbs = np.full(nstep, int(nb), dtype=np.int64)
+    if max_bin_minutes > 0:
+        nbs = np.maximum(nbs, np.ceil((1.0 / freqs) * 1440.0 / max_bin_minutes).astype(np.int64))
+
     if multipro == 0:
         #Store our answers -- this is for single threads (make this an option!)
         p = np.zeros_like(freqs)
@@ -1142,9 +1152,9 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
         for i in tqdm(range(nstep)):
             if (1.0 / freqs[i]) > duration:
-                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
             else:
-                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar)
 
     else: 
         # Store our answers
@@ -1162,7 +1172,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_processes) as executor:
             futures = {executor.submit(compute_bls_kernel, iarg[i], freqs, time, flux, \
-                                       nb, Rstar, Mstar, ndiv): i for i in range(iarg.shape[0])}
+                                       nbs, Rstar, Mstar, ndiv): i for i in range(iarg.shape[0])}
             
             for future in concurrent.futures.as_completed(futures):
                 i = futures[future]
@@ -1181,7 +1191,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     oneoverf_extrapolate = getattr(tpy5_inputs, "oneoverf_extrapolate", True)
     oneoverf_threshold = getattr(tpy5_inputs, "oneoverf_threshold", None)
     periods, power, bper, epo, bpower, snr, tdur, depth = \
-        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
+        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nbs, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
     if tpy5_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
                 filename, tpy5_inputs.plots)
@@ -1430,7 +1440,7 @@ def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
                         
     return p, jn1, jn2
 
-def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
+def compute_bls_kernel(iarg, freqs, time, flux, nbs, Rstar, Mstar, ndiv):
     
     p = np.zeros((ndiv))
     jn1 = np.zeros((ndiv), dtype = np.int32)
@@ -1443,9 +1453,9 @@ def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
     for i in iarg:
         # Check if Period > Duration
         if (1.0 / freqs[i]) > duration:
-            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
         else:
-            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar)
         j += 1
         
     return p, jn1, jn2
