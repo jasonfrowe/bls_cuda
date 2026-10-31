@@ -149,7 +149,22 @@ def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, m
 
 @jit(nopython=True, cache=True)
 def bls_stats(epo, period, tdur, npt, time, flux):
-    # Import necessary libraries if not already imported (e.g., NumPy)
+    """
+    Depth and SNR of the box (epo, period, tdur).
+
+    Returns (fmean, std, depth, snr):
+      fmean : median out-of-transit flux
+      std   : robust out-of-transit scatter, 1.4826 * MAD (std if MAD is 0)
+      depth : fmean - mean in-transit flux (the box depth that BLS fits)
+      snr   : depth / std * sqrt(number of in-transit points)
+
+    Median/MAD stop other transits, flares and variability in the
+    out-of-transit data from inflating the noise. The mean in-transit flux
+    stays stable when the box shifts by a few bins, a median does not
+    (short or V-shaped transits). Tested against the injected-planet
+    catalogue (dryrun_01): tighter match to the expected SNR than the
+    previous mean/std, median-depth version.
+    """
 
     f   = np.zeros((npt))
     fin = np.zeros((npt))
@@ -180,35 +195,31 @@ def bls_stats(epo, period, tdur, npt, time, flux):
             phase -= 1.0
         
         if (phase < ph1) or (phase > ph2):
-            k += 1
-            # Update the out-of-transit flux array with this value
             f[k] = flux[i]
+            k += 1
         else:
-            kin += 1
             fin[kin] = flux[i]
+            kin += 1
     
     if k > 3:
-        # Calculate standard deviation of out-of-transit data
-        std = np.std(f[:k])
-        fmean = np.mean(f[:k])
+        fmean = np.median(f[:k])
+        std = 1.4826 * np.median(np.abs(f[:k] - fmean))
+        if std <= 0.0:
+            std = np.std(f[:k])
     else:
         fmean = 0.0
         std = 0.0
     
     if kin > 1:
-        # Sort in-transit flux array and get median
-        sorted_fin = np.sort(fin[:kin])
-        depth = -sorted_fin[kin // 2] + fmean
+        depth = fmean - np.mean(fin[:kin])
     else:
-        depth = fmean
+        depth = 0.0
     
     snr = 0.0
 
     if k > 3 and kin > 1 and std > 0.0:
         snr = depth / std * np.sqrt(kin)
-    
-    # Output statements can be handled as needed
-    
+
     return fmean, std, depth, snr
 
 def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, filename, plots):
