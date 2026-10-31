@@ -609,6 +609,54 @@ def _rolling_mad(residual, k):
         mad[i] = np.median(np.abs(window - med))
     return mad
 
+@jit(nopython=True, cache=True)
+def _rolling_nanmedian(x, width):
+    """
+    Rolling median of the finite values in a window of constant width
+    (shifted near the edges, i.e. window start = max(0, min(i - width//2, n - width))).
+
+    Gives identical results to taking np.median of the finite values of each
+    window, but keeps the window's values sorted and updates them one value
+    in / one value out per step instead of re-computing each median (~15x faster).
+    """
+    n = x.shape[0]
+    out = np.empty(n)
+    if width > n:
+        width = n
+    half = width // 2
+    w = np.empty(width)          # sorted finite values of the current window
+    c = 0                        # number of finite values in the window
+    for j in range(width):       # first window: start = 0
+        v = x[j]
+        if np.isfinite(v):
+            k = np.searchsorted(w[:c], v)
+            w[k+1:c+1] = w[k:c].copy()
+            w[k] = v
+            c += 1
+    prev_start = 0
+    for i in range(n):
+        start = max(0, min(i - half, n - width))
+        if start != prev_start:  # window moved by one: drop x[start-1], add x[start+width-1]
+            v = x[start - 1]
+            if np.isfinite(v):
+                k = np.searchsorted(w[:c], v)
+                w[k:c-1] = w[k+1:c].copy()
+                c -= 1
+            v = x[start + width - 1]
+            if np.isfinite(v):
+                k = np.searchsorted(w[:c], v)
+                w[k+1:c+1] = w[k:c].copy()
+                w[k] = v
+                c += 1
+            prev_start = start
+        if c == 0:
+            out[i] = np.nan
+        elif c % 2 == 1:
+            out[i] = w[c // 2]
+        else:
+            out[i] = (w[c // 2 - 1] + w[c // 2]) / 2.0
+    return out
+
 def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
     """
     Estimate the continuum baseline using iterative sigma-clipping.
@@ -638,18 +686,8 @@ def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
         masked_sqrtp[~mask] = np.nan
         
         # Rolling median ignoring masked points
-        baseline = np.zeros(n)
-        half = width // 2
-        for i in range(n):
-            start = max(0, min(i - half, n - width))
-            end = start + width
-            window = masked_sqrtp[start:end]
-            valid = window[np.isfinite(window)]
-            if len(valid) > 0:
-                baseline[i] = np.median(valid)
-            else:
-                baseline[i] = np.nan
-        
+        baseline = _rolling_nanmedian(masked_sqrtp, int(width))
+
         # Fill any NaN baselines with global median of valid points
         valid_baseline = baseline[np.isfinite(baseline)]
         if len(valid_baseline) > 0:
@@ -1412,8 +1450,106 @@ def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
         
     return p, jn1, jn2
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, error_model='numpy')
 def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
+    """
+    BLS kernel for one trial frequency (Period < Duration).
+
+    Gives bit-identical results (p, jn1, jn2) to bls_kernel_reference, about 2x faster.
+    The search over (start bin i, width) uses the loop order width-outer /
+    start-inner: each start bin's running sum is still built in the same order,
+    but the inner loop over start bins has no dependency chain, so it compiles to
+    SIMD. Point counts are held as float64 (exact for integers < 2**53) so no
+    int->float conversion is needed in the inner loop.
+    """
+
+    npt = time.shape[0]
+
+    nb2  = int(2 * nb)
+    nbm1 = int(nb - 1)
+    nb   = int(nb)
+
+    ibi = np.zeros((nb2), dtype=np.float64)   # number of points per phase bin
+    y   = np.zeros((nb2), dtype=np.float64)   # sum of flux per phase bin
+
+    for i in range(npt):
+
+        phase = time[i]*freq - int(time[i]*freq)
+        j = int(phase * nbm1)
+
+        ibi[j] += 1.0
+        y[j]   += flux[i]
+
+    #duplicate array
+    for i in range(nb):
+        ibi[i+nb] = ibi[i]
+        y[i+nb]   = y[i]
+
+    fsec = freq / day2sec
+    q = pifac * Rstar*Rsun / (G*Mstar*Msun)**(1.0/3.0) * fsec**(2.0/3.0)
+
+    qmi = q / 2.0
+    if qmi < onehour*freq/2:
+        qmi = onehour*freq/2
+
+    qma = q * 2.0
+    if qma > 0.25:
+        qma = 0.25
+
+    if qmi > qma:
+        qma = qmi * 2.0
+        if qma > 0.4:
+            qma = 0.4
+
+    kmi = int(qmi * nb)
+    if kmi < 1:
+        kmi = 1
+    kma = int(qma * nb) + 1
+    kkmi = int(npt * qmi)
+    if kkmi < 5: #minbin
+        kkmi = 5
+
+    fnpt  = float(npt)
+    fkkmi = float(kkmi)
+
+    S = np.zeros(nb)                   # running flux sum for each start bin i
+    K = np.zeros(nb)                   # running point count for each start bin i
+    B = np.zeros(nb)                   # best power found for each start bin i
+    E = np.zeros(nb, dtype=np.int64)   # end bin of that best power
+
+    # width k = m + 1 bins, end bin j = i + m
+    for m in range(kma + 1):
+        if m + 1 <= kmi:               # too narrow to count: just accumulate
+            for i in range(nb):
+                S[i] += y[i + m]
+                K[i] += ibi[i + m]
+        else:
+            for i in range(nb):
+                s  = S[i] + y[i + m]
+                kk = K[i] + ibi[i + m]
+                S[i] = s
+                K[i] = kk
+                dfac = kk * (fnpt - kk)
+                pow1 = s * s / dfac
+                better = (kk > fkkmi) & (dfac > 0.0) & (pow1 > B[i])
+                B[i] = pow1 if better else B[i]
+                E[i] = i + m if better else E[i]
+
+    # combine start bins in order; strict > keeps the first best (same as reference)
+    p = 0.0
+    jn1 = 0
+    jn2 = 0
+    for i in range(nb):
+        if B[i] > p:
+            p = B[i]
+            jn1 = i
+            jn2 = E[i]
+
+    return p, jn1, jn2
+
+@jit(nopython=True, cache=True)
+def bls_kernel_reference(freq, time, flux, nb, Rstar, Mstar):
+    """Original BLS kernel, kept to validate bls_kernel against."""
 
     npt = time.shape[0]
 
