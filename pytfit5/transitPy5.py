@@ -576,6 +576,14 @@ class tpy5_inputs_class:
         self.iter_sigma_threshold = 3.0  # Sigma threshold for transit detection
         self.iter_min_duration    = 0.05 # Minimum transit duration in days (~1 hour)
         self.iter_verbose        = False  # Print iteration progress and statistics
+        self.iter_mask_mode      = "points" # How dips are found for masking: "points" = runs of single points
+                                          #   below -iter_sigma_threshold*std, at least iter_min_duration long;
+                                          #   "binned" = residuals averaged over iter_bin_hours below
+                                          #   -iter_sigma_threshold*MAD noise (finds shallower/shorter dips)
+        self.iter_bin_hours      = 1.0    # Averaging window for iter_mask_mode = "binned" [hours]
+        self.cut_direction       = "both" # cutoutliers: "both" = cut high and low outliers;
+                                          #   "up" = cut only high outliers (flares, cosmic rays), keeping
+                                          #   1-2 cadence transits
         # BLS parameters (consolidated from gbls_inputs_class)
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
@@ -1085,12 +1093,16 @@ def run_sigclip_global(phot, tpy5_inputs):
 
 def run_cutoutliers(phot, tpy5_inputs):
 
-    phot.icut = np.maximum(cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip), phot.icut)
+    direction = getattr(tpy5_inputs, "cut_direction", "both")
+    phot.icut = np.maximum(cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip,
+                                       direction=direction), phot.icut)
     tpy5_inputs.dataclip = 1 
     
-def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
+def cutoutliers(x, y, nsampmax = 3, sigma = 3.0, direction = "both"):
     """
-    Uses derivatives to cut outliers
+    Uses derivatives to cut outliers.
+    direction = "both": cut points far above or below both neighbours.
+    direction = "up":   cut only points far above both neighbours.
     """
 
     threshold = 0.0005 #Fixed threshold, if sigma <= 0
@@ -1118,7 +1130,10 @@ def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
         vp = y[i] - y[i+1]
         vm = y[i] - y[i-1]
 
-        if  (np.abs(vp) > threshold) and (np.abs(vm) > threshold) and (vp/vm > 0):
+        if direction == "up":
+            if (vp > threshold) and (vm > threshold):
+                icut[i] = 1 #cut
+        elif  (np.abs(vp) > threshold) and (np.abs(vm) > threshold) and (vp/vm > 0):
             icut[i] = 1 #cut
 
     return icut
@@ -1156,6 +1171,10 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     None (modifies phot.flux_f and phot.tflag in place)
     """
     
+    if getattr(tpy5_inputs, "iter_mask_mode", "points") == "binned":
+        _polyfilter_iterative_binned(phot, tpy5_inputs)
+        return
+
     # Get parameters from tpy5_inputs class
     max_iters = tpy5_inputs.iter_max_iters
     sigma_threshold = tpy5_inputs.iter_sigma_threshold
@@ -1270,6 +1289,58 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
         print(f"Iterative detrending complete")
         print(f"  Final masked points: {np.sum(phot.tflag)} (original: {np.sum(tflag_original)})")
         print(f"  Newly detected transit points: {np.sum(phot.tflag) - np.sum(tflag_original)}")
+
+
+def _polyfilter_iterative_binned(phot, tpy5_inputs):
+    """
+    Iterative detrending for iter_mask_mode = "binned".
+
+    Each iteration: detrend with the current mask, average the residuals over
+    iter_bin_hours, and mask points where the average is below
+    -iter_sigma_threshold times its robust (MAD) noise, plus one averaging
+    window on each side. Stops when nothing new is masked or after
+    iter_max_iters. Averaging finds transits too shallow per point and
+    shorter than iter_min_duration, which the "points" mode misses.
+    """
+    max_iters = tpy5_inputs.iter_max_iters
+    nsig = tpy5_inputs.iter_sigma_threshold
+    win_h = getattr(tpy5_inputs, "iter_bin_hours", 1.0)
+    multipro = getattr(tpy5_inputs, "multipro", 1)
+
+    if not hasattr(phot, 'tflag') or phot.tflag is None or len(phot.tflag) == 0:
+        phot.tflag = np.zeros(len(phot.time))
+
+    ts = np.argsort(phot.time)                     # work in time order
+    cad = np.median(np.diff(phot.time[ts]))
+    n = max(2, int(round(win_h / 24.0 / cad)))     # points per averaging window
+    kern = np.ones(n) / n
+    dil = np.ones(2 * n + 1)
+
+    for iteration in range(max_iters):
+        phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag,
+                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                 multipro=multipro)
+        r = (phot.flux_f - np.median(phot.flux_f))[ts]
+        sm = np.convolve(r, kern, mode='same')
+        unm = phot.tflag[ts] == 0
+        if np.sum(unm) < 10:
+            break
+        med = np.median(sm[unm])
+        sig = 1.4826 * np.median(np.abs(sm[unm] - med))
+        if not sig > 0:
+            break
+        flag = (sm - med) < -nsig * sig
+        new = (np.convolve(flag.astype(float), dil, mode='same') > 0) & unm
+        if np.sum(new) == 0:
+            break
+        newmask = np.zeros(len(phot.time), dtype=bool)
+        newmask[ts] = new
+        phot.tflag = (phot.tflag.astype(bool) | newmask).astype(int)
+
+    phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag,
+                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                             multipro=multipro)
+    tpy5_inputs.detrended = 1
 
 
 def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
