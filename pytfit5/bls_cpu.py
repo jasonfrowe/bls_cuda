@@ -1472,11 +1472,18 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
     ibi = np.zeros((nb2), dtype=np.float64)   # number of points per phase bin
     y   = np.zeros((nb2), dtype=np.float64)   # sum of flux per phase bin
 
+    # Bin index of each point. Separate loop with int32 truncation so it
+    # vectorizes (same values as int() for time*freq < 2**31).
+    jbin  = np.empty(npt, dtype=np.int32)
+    fnbm1 = float(nbm1)
     for i in range(npt):
+        tf = time[i]*freq
+        phase = tf - np.int32(tf)
+        jbin[i] = np.int32(phase * fnbm1)
 
-        phase = time[i]*freq - int(time[i]*freq)
-        j = int(phase * nbm1)
-
+    # Add points to bins in time order (same summation order as before)
+    for i in range(npt):
+        j = jbin[i]
         ibi[j] += 1.0
         y[j]   += flux[i]
 
