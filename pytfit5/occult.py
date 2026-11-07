@@ -2,7 +2,7 @@ import numpy as np
 from pytfit5.elliptic_int import ellE, ellK, ellPi
 from numba import njit
 
-@njit
+@njit(cache=True)
 def occultUniform(z0, p):
     n = len(z0)
 
@@ -33,7 +33,7 @@ def occultUniform(z0, p):
 
     return flux
 
-@njit
+@njit(cache=True)
 def occultQuad(z0, u1, u2, p):
     n = len(z0)
 
@@ -118,7 +118,7 @@ def occultQuad(z0, u1, u2, p):
     
     return flux
         
-@njit
+@njit(cache=True)
 def lambda1(p, z, k, a, b, q):
     Kk = ellK(k)
     Ek = ellE(k)
@@ -129,7 +129,7 @@ def lambda1(p, z, k, a, b, q):
 
     return 1/(9*np.pi*np.sqrt(p*z)) * (temp1 + temp2 - 3*q/a * Pk)
 
-@njit
+@njit(cache=True)
 def lambda2(p, z, k_i, a, b, q):
     Kk = ellK(k_i)
     Ek = ellE(k_i)
@@ -140,7 +140,7 @@ def lambda2(p, z, k_i, a, b, q):
 
     return 2/(9*np.pi*np.sqrt(1 - a)) * (temp1 + temp2 - 3*q/a * Pk)
 
-@njit
+@njit(cache=True)
 def lambda3(p, k):
     Kk = ellK(k)
     Ek = ellE(k)
@@ -150,7 +150,7 @@ def lambda3(p, k):
 
     return 1/3 + temp1 - temp2
 
-@njit
+@njit(cache=True)
 def lambda4(p, k):
     Kk = ellK(k)
     Ek = ellE(k)
@@ -160,19 +160,19 @@ def lambda4(p, k):
 
     return 1/3 + 2/(9*np.pi) * (temp1 + temp2)
 
-@njit
+@njit(cache=True)
 def lambda5(p):
     return 2/(3*np.pi) * np.arccos(1 - 2*p) - 4/(9*np.pi) * (3 + 2*p - 8*p*p) * np.sqrt(p*(1 - p)) # Why multiply by np.sqrt(p*(1 - p)) ?
 
-@njit
+@njit(cache=True)
 def eta1(k0, k1, p, z, a ,b):
     return 1/(2*np.pi) * (k1 + 2*eta2(p, z)*k0 - 0.25*(1 + 5*p*p + z*z) * np.sqrt((1-a) * (b-1)))
 
-@njit
+@njit(cache=True)
 def eta2(p, z):
     return p*p/2 * (p*p + 2*z*z)
 
-@njit
+@njit(cache=True)
 def occultSmall(z0, c1, c2, c3, c4, p):
     n = len(z0)
     flux = np.zeros(n)

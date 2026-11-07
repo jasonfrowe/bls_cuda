@@ -1133,7 +1133,8 @@ def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
 def run_polyfilter(phot_SC, tpy5_inputs):
 
     phot_SC.flux_f = polyfilter(phot_SC.time, phot_SC.flux, phot_SC.ferr, phot_SC.tflag, \
-                                tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                                tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
 
     tpy5_inputs.detrended = 1 # Mark that we have detrended data
 
@@ -1184,7 +1185,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     for iteration in range(max_iters):
         # Run detrending with current mask
         phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag, 
-                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
         
         # Calculate residuals
         residuals = phot.flux_f - np.median(phot.flux_f)
@@ -1266,7 +1268,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     
     # Final detrending pass with complete mask
     phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag, 
-                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
     
     tpy5_inputs.detrended = 1
     
@@ -1318,8 +1321,8 @@ def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
 
     else:
     
-        max_processes = os.cpu_count()
-        ndiv = npt // (max_processes - 1) + 1
+        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  # CPUs this process may use (respects Slurm), not the whole node
+        ndiv = npt // max_processes + 1
         offset = np.zeros((max_processes, ndiv))
     
         iarg = np.zeros((max_processes, ndiv), dtype = int)
