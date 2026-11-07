@@ -109,7 +109,7 @@ def prep_timeflux(tpy5_inputs, time, flux, ferr=None, central=True):
 
 
 ## FOR THE PERIODIC SEARCH ONLY
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def nyquest_cpu(time):
 
     dt = np.zeros((time.shape[0]))
@@ -122,7 +122,7 @@ def nyquest_cpu(time):
 
     return nyq
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def qfunc_cpu(f, Mstar, Rstar):
     '''
     Calculates optimal phase for circular orbit
@@ -132,7 +132,7 @@ def qfunc_cpu(f, Mstar, Rstar):
     q = pifac * Rstar * Rsun / (G * Mstar * Msun)**(1.0/3.0) * fsec**(2.0/3.0)
     return q
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -149,7 +149,7 @@ def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
     return nstep
     
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -174,7 +174,7 @@ def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, m
         f = f + df   #next frequency to scan
     return freqs
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
     """
     BLS kernel optimized for single event searches (Period > Duration).
@@ -292,7 +292,7 @@ def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
         
     return p, jn1, jn2
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
 
     npt = time.shape[0]
@@ -370,7 +370,7 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
     
     return p, jn1, jn2
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_stats(epo, period, tdur, npt, time, flux):
     # Import necessary libraries if not already imported (e.g., NumPy)
 
@@ -698,8 +698,9 @@ def periodic_search(tpy5_inputs, time, flux):
 
     else: 
         # Store our answers
-        max_processes = os.cpu_count()
-        ndiv = nstep // (max_processes - 1) + 1
+        # CPUs this process may use (respects Slurm), not the whole node
+        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  
+        ndiv = nstep // max_processes + 1
         
         p   = np.zeros((max_processes, ndiv))
         jn1 = np.zeros((max_processes, ndiv), dtype=np.int32)
@@ -992,7 +993,7 @@ def bls_periodic(tpy5_inputs, time, flux, ferr=None):
 
 
 ## FOR THE PULSE SEARCH ONLY
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def pulse_kernel(flux_binned, counts_binned, widths, sigma):
     """
     Scans for single pulses. Returns the Signal-to-Noise Ratio (SNR).
