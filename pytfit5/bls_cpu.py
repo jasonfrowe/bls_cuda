@@ -1,5 +1,11 @@
 import os
+import sys
+from pathlib import Path
+funcdir = str((Path(__file__).resolve()).parent)
+homedir = str(Path(funcdir).parent.absolute())
+# funcdir -> folder (parent removes the file); homedir -> bls_cuda
 
+import pprint
 import numpy as np
 
 import matplotlib.pyplot as plt
@@ -19,11 +25,11 @@ from scipy.optimize import curve_fit
 from scipy import stats
 
 import concurrent.futures
-import os
-
-# Import tpy5_inputs_class from transitPy5
+from transitleastsquares import transitleastsquares
+# Importing the modules, must be from bls_cuda for pytfit5 to be a module.
+sys.path.insert(0, f'{homedir}')
 from pytfit5.transitPy5 import tpy5_inputs_class
-from pytfit5 import period_validation as pval
+import pytfit5.period_validation as pval
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -35,11 +41,13 @@ Msun    = 1.9891e30           # kg  mass of Sun
 pifac   = 1.083852140278e0    # (2pi)^(2/3)/pi
 day2sec = 86400.0             # seconds in a day
 onehour = 1.0/24.0            # one hour convected to day.
+kepfac = (2*np.pi)**2/G       # used below in the tls calculation
 
 class gbls_ans_class:
     def __init__(self):
         self.epo      = 0.0
         self.bper     = 0.0
+        self.rawper   = 0.0
         self.bpower   = -1
         self.snr      = -1
         self.tdur     = 8.0
@@ -47,8 +55,10 @@ class gbls_ans_class:
         self.periods  = None  # Full period array (if return_spectrum=True)
         self.power    = None  # Full power array (if return_spectrum=True)
         self.freqs    = None  # Full frequency array (if return_spectrum=True)
+        self.SR       = None # The signal residuals which apply for TLS
 
-#generic routine to read in files
+## COMMON FUNCTIONS USED ACROSS BOTH SEARCHES
+# Generic routine to read in files
 def readfile(filename):
 
     itime1 = 1765.5/86400.0 #Kepler integration time
@@ -57,7 +67,7 @@ def readfile(filename):
     #data=[] #Create an empty list
     time  = []
     flux  = []
-    # ferr  = []
+    ferr  = []
     # itime = []
     f=open(filename)
     for line in f:
@@ -76,11 +86,37 @@ def readfile(filename):
     #data = np.array(data)
     time = np.array(time)
     flux = np.array(flux)
-    # ferr = np.array(ferr)
+    ferr = np.array(ferr)
     # itime = np.array(itime)
     
-    return time, flux# , ferr, itime
+    return time, flux, ferr, # itime
 
+def prep_timeflux(tpy5_inputs, time, flux, ferr=None, central=True):
+    '''
+    Assigns the lcdir and filename if neccessary to prevent errors.
+    Ensures time and flux are loaded if not provided. Pre-processing
+    which is to find the minimum time and to subtract the median of flux.
+    Note: zerotime is pre-defined and mintime > zerotime bc no negative t values
+    '''
+
+    if tpy5_inputs.lcdir != "":
+        filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+    else:
+        filename = tpy5_inputs.filename
+        
+    if (time.shape[0] < 2) or (flux.shape[0] < 2):
+        time, flux, ferr = readfile(filename)
+    if not central:
+        return filename, time, flux, ferr
+        
+    # np.min(time) = tpy5_inputs.mintime + tpy5_inputs.zerotime
+    tpy5_inputs.mintime = np.min(time)
+    time = time - tpy5_inputs.mintime 
+    flux = flux - np.median(flux)
+
+    return filename, time, flux, ferr
+
+## FOR THE PERIODIC SEARCH ONLY
 @jit(nopython=True, cache=True)
 def nyquest_cpu(time):
 
@@ -818,6 +854,9 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     width = _estimate_medfilt_width(freqs, time, Mstar, Rstar, max_width_bins=nstep-1, alpha=4*ofac, min_width=nine_if_even(int(max(5, ofac*4))))
     
     sqrtp = np.sqrt(p)
+    # Sanitize as below but this is for the rawperiod.
+    rawpower = np.where(np.isfinite(sqrtp), sqrtp, -1e30)
+    rawper = periods[np.argsort(rawpower)[-1]] 
     
     eps = 1e-12
     
@@ -1014,32 +1053,22 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     #Dirty translation of Fortran from transitfind5
     fmean, std, depth, snr = bls_stats(epo, bper, tdur, npt, time + mintime - Keptime, flux) 
 
-    return periods, power, bper, epo, bpower, snr, tdur, depth
+    return periods, power, bper, rawper, epo, bpower, snr, tdur, depth
 
-def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
-
-    if tpy5_inputs.lcdir == "":
-        filename = tpy5_inputs.filename
-    else:
-        filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
+def periodic_search(tpy5_inputs, time, flux):
+    '''
+    Returns the gbls_ans object with the full spectrum.
+    '''
     Keptime  = tpy5_inputs.zerotime
+    mintime  = tpy5_inputs.mintime
     freq1    = tpy5_inputs.freq1
     freq2    = tpy5_inputs.freq2
     ofac     = tpy5_inputs.ofac
     Mstar    = tpy5_inputs.mstar
     Rstar    = tpy5_inputs.rstar
     minbin   = tpy5_inputs.minbin
-    nper     = tpy5_inputs.nper
-    multipro = tpy5_inputs.multipro
-    
-    if (time.shape[0] < 2) or (flux.shape[0] < 2):
-        time, flux = readfile(filename)
-        
-    #Simple transform of time and flux arrays
-    mintime = np.min(time)
-    time = time - mintime #time starts at zero
-    flux = flux - np.median(flux)  #flux is centred around 0
 
+    multipro = tpy5_inputs.multipro
     npt   = time.shape[0]                     #number of data points
     nb    = np.min((2000, time.shape[0]-1.0)) #npt - 1, sets how the data in binned in phase.
     nyq   = nyquest_cpu(time)            #nyquest [c/d] -- CPU seems to be faster x2 for 1080ti vs 10700
@@ -1061,14 +1090,11 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
             f"  freq2 = {freq2:.6f} c/d (period = {1/freq2:.2f} days)"
         )
 
-    #Compute some quantities 
+    # Compute some quantities 
     steps = int(ofac * (freq2 - freq1) * npt/nyq) #naive number of frequencies to scan
     df0   = (freq2 - freq1) / steps
-    
     #Calculate the number of steps needed to scan the frequency range 
     nstep = calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
-    # print("freqs: ", freq1, freq2)
-    # print("nstep: ", nstep)
     
     # Validate minimum nstep to ensure meaningful BLS search
     if nstep < 3:
@@ -1087,7 +1113,6 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     #no need to break up runs
     nper = nstep
-    
     #Calculate the frequencies that we will be folding at
     freqs = calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
@@ -1110,7 +1135,8 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     else: 
         # Store our answers
-        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  # CPUs this process may use (respects Slurm), not the whole node
+        # CPUs this process may use (respects Slurm), not the whole node
+        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  
         ndiv = nstep // max_processes + 1
         
         p   = np.zeros((max_processes, ndiv))
@@ -1142,41 +1168,35 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     oneoverf_correction = getattr(tpy5_inputs, "oneoverf_correction", False)
     oneoverf_extrapolate = getattr(tpy5_inputs, "oneoverf_extrapolate", True)
     oneoverf_threshold = getattr(tpy5_inputs, "oneoverf_threshold", None)
-    periods, power, bper, epo, bpower, snr, tdur, depth = \
+    periods, power, bper, rawper, epo, bpower, snr, tdur, depth = \
         calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
-    if tpy5_inputs.plots > 0:
-        makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
-                filename, tpy5_inputs.plots)
 
     gbls_ans = gbls_ans_class()
     gbls_ans.epo    = epo
     gbls_ans.bper   = bper
+    gbls_ans.rawper = rawper
     gbls_ans.bpower = bpower
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
-    
-    # Optionally store full spectrum
-    if tpy5_inputs.return_spectrum:
-        gbls_ans.periods = periods
-        gbls_ans.power = power
-        gbls_ans.freqs = freqs
+    # Always return the full spectrum for plotting functionality
+    gbls_ans.periods = periods
+    gbls_ans.power = power
+    gbls_ans.freqs = freqs
 
     return gbls_ans
 
-# def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
-    
-#     p   = np.zeros((ndiv))
-#     jn1 = np.zeros((ndiv), dtype = np.int32)
-#     jn2 = np.zeros((ndiv), dtype = np.int32)
+def bls_periodic(tpy5_inputs, time, flux, ferr=None):
 
-#     j = 0
-#     for i in iarg:
-#         p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
-#         j += 1
-    
-#     return p, jn1, jn2
+    filename, time, flux, _ = prep_timeflux(tpy5_inputs, time, flux)
+    ans = periodic_search(tpy5_inputs, time, flux)
+    if tpy5_inputs.plots > 0:            
+        makeplot(ans.periods, ans.power, time, flux, tpy5_inputs.mintime, \
+                    tpy5_inputs.zerotime, ans.epo, ans.bper, ans.bpower, ans.snr, \
+                    ans.tdur, ans.depth, filename, tpy5_inputs.plots)
+    return ans
 
+## FOR THE PULSE SEARCH ONLY
 @jit(nopython=True, cache=True)
 def bls_pulse_kernel(flux_binned, counts_binned, widths, sigma):
     """
@@ -1229,7 +1249,15 @@ def bls_pulse_kernel(flux_binned, counts_binned, widths, sigma):
         
     return best_snr, best_starts, best_depths
 
-def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=12.0, bin_duration_days=None):
+def pulse_search(tpy5_inputs, time, flux):
+    '''
+    The routine which searches for the pulse. The larger container 
+    functions handle the normalisation and plotting functionality.
+    Returns the gbls_ans_class, which is the same as the perioidic_search.
+    '''
+    min_duration_hours = tpy5_inputs.pulse_min_duration_hours 
+    max_duration_hours = tpy5_inputs.pulse_max_duration_hours
+    bin_duration_days = tpy5_inputs.pulse_bin_duration_days
     
     # 1. Detrend / Zero-Center
     # Crucial step: Remove median to prevent wide boxes from grabbing offsets
@@ -1241,7 +1269,7 @@ def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=
     mad = np.median(np.abs(flux_norm))
     sigma = mad * 1.4826
     
-    t_start = time[0]
+    t_start = time[0] # should this be the same as np.min(time)?
     duration = time[-1] - t_start
     
     # 2. Binning
@@ -1275,24 +1303,24 @@ def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=
     # 5. Extract Best Result
     best_idx = np.argmax(snrs)
     best_snr = snrs[best_idx]
-    
     best_width_bins = widths[best_idx]
     best_start_bin  = starts[best_idx]
     best_depth = depths[best_idx]
-    
     best_duration = best_width_bins * bin_duration_days
     best_t0 = t_start + (best_start_bin + 0.5 * best_width_bins) * bin_duration_days
+    # Write into the form of the gbls answer class
+    ans = gbls_ans_class()
+    ans.epo = best_t0 + tpy5_inputs.mintime - tpy5_inputs.zerotime 
+    rho_star = pval.get_stellar_density(tpy5_inputs.mstar, tpy5_inputs.rstar)
+    P_est, _, _, _ = pval.estimate_single_transit_period(time=time,
+                        tdur=best_duration, rho_star=rho_star, margin_factor=1.5)
+    ans.bper = P_est    
+    ans.snr = best_snr
+    ans.tdur = best_duration
+    ans.depth = -best_depth
+    ans.bpower = best_snr # Use SNR as power proxy
     
-    return {
-        'snr': best_snr,              # Now in SNR units
-        't0': best_t0,
-        'duration': best_duration,
-        'depth': best_depth,
-        'spectrum_duration': widths * bin_duration_days * 24.0,
-        'spectrum_snr': snrs
-    }
-
-
+    return ans
 
 @jit(nopython=True, cache=True)
 def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
@@ -1595,170 +1623,164 @@ def makeplot_pulse(time, flux, ans, mintime, Keptime, filename, plots):
     else:
         plt.show()
 
-def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
+def bls_pulse(tpy5_inputs, time, flux, ferr=None):
+    '''
+    Prepare the time and flux for the pulse search before running it.
+    Considers the plotting mechanism. 
+    '''
+    filename, time, flux, _ = prep_timeflux(tpy5_inputs, time, flux)
+    ans =  pulse_search(tpy5_inputs, time, flux)
+    if tpy5_inputs.plots > 0:            
+        makeplot_pulse(time, flux, ans, tpy5_inputs.mintime, tpy5_inputs.zerotime, \
+                       filename, tpy5_inputs.plots)
+    return ans
+    
+def bls(tpy5_inputs, time=np.array([0]), flux=np.array([0]), ferr=None):
     """
-    Combined Periodic and Single Pulse Search.
-    
-    Runs both standard BLS (periodic) and Pulse Search (single event).
-    Returns the result with the highest SNR.
-    
-    If Pulse Search wins:
-        - Returns a gbls_ans_class object with:
-            - bper = 0 (indicating single event)
-            - epo = pulse t0
-            - tdur = pulse duration
-            - depth = pulse depth
-            - snr = pulse snr
-    
-    If BLS wins:
-        - Returns the standard gbls_ans_class object from bls()
-        
-    Generates a consolidated plot if inputs.plots > 0.
+    Combined Periodic and Single Pulse Search. Runs both standard BLS (periodic)
+    and Pulse Search (single event). Returns the result with the highest SNR.
     """
-    
-    # Extract parameters from inputs (like bls() does)
-    Keptime = tpy5_inputs.zerotime  # Time offset for epoch calculation
-    
-    # 1. Run Periodic BLS
-    # Temporarily disable plotting in bls() to handle it here
-    # Force return_spectrum=True so we have data for plotting if needed
-    original_plots = tpy5_inputs.plots
-    original_return_spectrum = getattr(tpy5_inputs, 'return_spectrum', False)
-    
-    tpy5_inputs.plots = 0 
-    tpy5_inputs.return_spectrum = True
-    
-    # Ensure time and flux are loaded if not provided
-    if (time.shape[0] < 2) or (flux.shape[0] < 2):
-        if tpy5_inputs.lcdir == "":
-            filename = tpy5_inputs.filename
-        else:
-            filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
-        time, flux = readfile(filename)
-        # Pre-process like bls() does
-        mintime = np.min(time)
-        time = time - mintime
-        flux = flux - np.median(flux)
-    else:
-        # If provided, we still need mintime for plotting if we want to match bls() behavior exactly
-        # But bls() calculates mintime internally. 
-        # If we pass time/flux to bls(), it uses them as is (assuming they are already processed or bls processes them).
-        # bls() does: mintime = np.min(time); time = time - mintime; flux = flux - np.median(flux)
-        # So we should let bls() do its thing, but for pulse search we need the same processed data?
-        # Actually, bls() modifies 'time' and 'flux' local variables, not the passed arrays (unless in-place).
-        # Python arguments are passed by assignment. 'time = time - mintime' creates a new local array.
-        # So the passed 'time' is unchanged.
-        # We should process time/flux here so we pass the SAME data to both searches.
-        mintime = np.min(time)
-        time_proc = time - mintime
-        flux_proc = flux - np.median(flux)
-        
-        # Update: bls() re-calculates mintime and re-centers time/flux. 
-        # If we pass already centered data, mintime=0.
-        # To be safe, let's pass the original data to bls() and let it handle it.
-        # But for pulse search, we need to do the same processing.
-        pass
 
-    # Run BLS
-    bls_ans = bls(tpy5_inputs, time, flux)
+    # Prepare the time and flux for the search.
+    filename, time, flux, _ = prep_timeflux(tpy5_inputs, time, flux)
+    # 1. Run Periodic BLS
+    per_ans = periodic_search(tpy5_inputs, time, flux)
+    # 2. Run the pulse search
+    pulse_ans =  pulse_search(tpy5_inputs, time, flux)
     
-    # Restore inputs settings
-    tpy5_inputs.plots = original_plots
-    tpy5_inputs.return_spectrum = original_return_spectrum
-    
-    # 2. Run Pulse Search
-    # We need to process data for pulse search as bls() does internally
-    # bls() does:
-    mintime = np.min(time)
-    time_proc = time - mintime
-    flux_proc = flux - np.median(flux)
-    
-    # Use parameters from inputs class
-    pulse_res = compute_pulse_search(
-        time_proc, 
-        flux_proc, 
-        min_duration_hours=tpy5_inputs.pulse_min_duration_hours, 
-        max_duration_hours=tpy5_inputs.pulse_max_duration_hours,
-        bin_duration_days=tpy5_inputs.pulse_bin_duration_days
-    )
-    
-    # 3. Compare Results
-    pulse_snr = pulse_res['snr'] if pulse_res is not None else 0.0
-    
-    # Determine winner
-    if bls_ans.snr >= pulse_snr:
-        final_ans = bls_ans
-        is_periodic = True
-    else:
-        # Create answer object for pulse
-        final_ans = gbls_ans_class()
-        # Adjust T0 to match the convention used by periodic BLS
-        # pulse_res['t0'] is in time_proc frame (starting at 0)
-        # Need to add back mintime and subtract Keptime (zerotime)
-        final_ans.epo = pulse_res['t0'] + mintime - Keptime
-        
-        # Estimate period for single transit
-        rho_star = pval.get_stellar_density(tpy5_inputs.mstar, tpy5_inputs.rstar)
-        P_est, _, _, _ = pval.estimate_single_transit_period(
-            time=time_proc,
-            tdur=pulse_res['duration'],
-            rho_star=rho_star,
-            margin_factor=1.5
-        )
-        final_ans.bper = P_est
-        
-        final_ans.snr = pulse_res['snr']
-        final_ans.tdur = pulse_res['duration']
-        final_ans.depth = -pulse_res['depth']
-        final_ans.bpower = pulse_res['snr'] # Use SNR as power proxy
+    # 3. Compare to see which has a stronger signal and determine a winner.
+    pulse_snr = pulse_ans.snr if pulse_ans is not None else 0.0
+    if pulse_snr > per_ans.snr:
+        ans = pulse_ans
         is_periodic = False
-        
+    else:
+        ans = per_ans
+        is_periodic = True
+
     # 4. Plotting
-    if tpy5_inputs.plots > 0:
-        if tpy5_inputs.lcdir == "":
-            filename = tpy5_inputs.filename
-        else:
-            filename = tpy5_inputs.lcdir + "/" + tpy5_inputs.filename
-            
-        Keptime = tpy5_inputs.zerotime
-        
-        if is_periodic:
+    if tpy5_inputs.plots > 0:        
+        if is_periodic: # hasn't previously run by tinkering with inputs.
             # Use standard makeplot
             # We need to ensure we have the spectrum data
-            if bls_ans.periods is not None:
-                makeplot(
-                    bls_ans.periods, 
-                    bls_ans.power, 
-                    time_proc, 
-                    flux_proc, 
-                    mintime, 
-                    Keptime, 
-                    bls_ans.epo, 
-                    bls_ans.bper, 
-                    bls_ans.bpower, 
-                    bls_ans.snr, 
-                    bls_ans.tdur, 
-                    bls_ans.depth, 
-                    filename, 
-                    tpy5_inputs.plots
-                )
+            if per_ans.periods is not None:
+                makeplot(per_ans.periods, per_ans.power, time, flux, tpy5_inputs.mintime, \
+                    tpy5_inputs.zerotime, per_ans.epo, per_ans.bper, per_ans.bpower, per_ans.snr, \
+                    per_ans.tdur, per_ans.depth, filename, tpy5_inputs.plots)
         else:
             # Use new pulse plot
-            makeplot_pulse(
-                time_proc, 
-                flux_proc, 
-                final_ans, 
-                mintime,
-                Keptime,
-                filename, 
-                tpy5_inputs.plots
-            )
+            makeplot_pulse(time, flux, pulse_ans, tpy5_inputs.mintime, tpy5_inputs.zerotime,\
+                           filename, tpy5_inputs.plots)
             
     # Cleanup spectrum if not requested
-    if is_periodic and not original_return_spectrum:
-        bls_ans.periods = None
-        bls_ans.power = None
-        bls_ans.freqs = None
+    if not tpy5_inputs.return_spectrum:
+        ans.periods = None
+        ans.power = None
+        ans.freqs = None
         
-    return final_ans
+    return ans
 
+## ADDING THE TLS FUNCTIONALITIES
+def minstpars(runpar, starr):
+    '''
+    Imposing a minimum threshold on our values to prevent a duration grid
+    that goes to values which are too small. Determined by pipeline parameters.
+    '''
+    minarr = (1-runpar.lowbuff) * starr
+    minarr[minarr < runpar.stthres] = (1-runpar.stbuff) * starr[minarr < runpar.stthres]
+    return tuple(minarr)
+
+def setgridbounds(runpar, t):
+    '''
+    Considering if there is already a minimum and maximum frequency set 
+    or if we are using the default parameters. Then, sanity check with a/rstar.
+    Setting the lower frequency for TLS by the number of transits. 
+    '''
+    # Setting the minimum period if the frequency is set.
+    pars = (runpar.pars).copy()
+    if runpar.freq2 <= 0:
+        pars['period_min'] = 0.5
+        # runpar.freq2 = 2.0
+    else:
+        pars['period_min'] = 1/runpar.freq2
+        
+    # Checking to see if pmin > than the minimum arstarmin
+    T2 = kepfac/(runpar.mstar*Msun) * (runpar.arstarmin*runpar.rstar*Rsun)**3
+    pmin = np.sqrt(T2)/day2sec
+    if pmin > pars['period_min']:
+        pars['period_min'] = pmin
+        # runpar.freq2 = 1/pmin
+        
+    # Setting the upper bound for the transit search
+    if runpar.freq1 <= 0:
+        pars['n_transits_min'] = 2
+        # runpar.freq1 = 2.0/(np.max(t)-np.min(t))
+    else:
+        pars['n_transits_min'] = int((np.max(t)-np.min(t))*runpar.freq1)
+        if pars['n_transits_min'] < 1:
+            pars['n_transits_min'] = 1
+            
+    return pars
+    
+def getTLSDict(runpar, t):
+    '''
+    We take the general parameters for TLS and curate it for the specific RIC.
+    This is primarily with the stellar parameters, and then we check for the
+    minimum period threshold as well as consider if we need to plot.
+    '''
+
+    pars = setgridbounds(runpar, t)
+    starr = np.array([runpar.rstar, runpar.mstar])
+    pars['R_star'], pars['M_star'], pars['u'] = *starr, runpar.u    
+    pars['R_star_min'], pars['M_star_min'] = minstpars(runpar, starr)
+    pars['R_star_max'], pars['M_star_max'] = starr*(1+runpar.upbuff)
+    
+    return pars
+
+def tls(tpy5_inputs, time=np.array([0]), flux=np.array([0]), dy=None):
+    '''
+    Running the TLS module and setting its parameters in the dictionary.
+    This is with the limb-darkening included, and no plot will be shown.
+    Zero-point is subtracted off.
+
+    verbose bug in tls means the keyword argument is given in the power function.
+    '''
+    filename, t, f, dy = prep_timeflux(tpy5_inputs, time, flux, dy, central=False)
+    defaultpars = getTLSDict(tpy5_inputs, t)
+    # The direct user input of parameters will override defaults.
+    pars = {**defaultpars, **tpy5_inputs.pars}
+    if tpy5_inputs.search_verbose:
+        pprint.pprint(pars)
+    t0 = t - tpy5_inputs.zerotime
+    model = transitleastsquares(t0, f, dy=dy)
+    tlsob = model.power(**pars, verbose=tpy5_inputs.search_verbose) # running TLS
+    try: # this fails if tlsob.SR is not an array
+        srU, srC = np.unique(tlsob.SR, return_counts=True)
+        srflag = (srU[0] < 10**(-3)) & (srC[0] > len(tlsob.SR)/100)
+    except: # therefore, there is an issue with our residuals
+        srflag = 1
+
+    tlsans = gbls_ans_class()
+    tlsans.epo      = tlsob.T0
+    tlsans.bper     = tlsob.period
+    tlsans.rawper   = tlsob.periods[np.argmax(tlsob.power_raw)]    
+    tlsans.bpower   = tlsob.SDE
+    tlsans.snr      = tlsob.snr
+    tlsans.tdur     = tlsob.duration
+    tlsans.depth    = (1-tlsob.depth)
+    tlsans.SR       = srflag
+    if tpy5_inputs.return_spectrum:
+        tlsans.periods  = tlsob.periods
+        tlsans.power    = tlsob.power  
+        # Rather than the frequencies, we return the signal residuals for TLS
+        tlsans.SR       = tlsob.SR
+
+    if tpy5_inputs.plots > 0:
+        timezeroed = t - np.min(t) # because we set central=False for prep_timeflux
+        flux_norm = f - np.median(f) # and transitleastsquares does its own processing
+        if np.isnan(tlsob.period) or tlsob.transit_count <= 1:
+            makeplot_pulse(timezeroed, flux_norm, tlsans, np.min(t), tpy5_inputs.zerotime, filename, tpy5_inputs.plots)
+        else:
+            makeplot(tlsob.periods, tlsob.power, timezeroed, f, np.min(t), tpy5_inputs.zerotime, \
+            tlsob.T0, tlsob.period, tlsob.SDE, tlsob.snr, tlsob.duration, (1-tlsob.depth), filename, tpy5_inputs.plots)
+        
+    return tlsans
