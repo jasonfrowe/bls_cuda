@@ -42,7 +42,7 @@ def interpolate_std(b_std, b_cen, freq):
     interp_std[interp_std == 0] = np.nanmean(interp_std)
     return interp_std
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def running_std_with_filter(data, half_window):
     # Calculate the overall standard deviation
     std = np.std(data)
