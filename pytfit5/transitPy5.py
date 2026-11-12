@@ -1567,24 +1567,31 @@ def checkperT0(samples,burninfrac,nthin,sol,serr):
         burnin=0
     
     
-    if iT0>-1:
-        mode,x_eval,kde1=modekdestimate(chain[:,iT0],burnin)
+    def _interval(i):
+        # A chain that never moved (e.g. started outside the priors) has no spread; the KDE would raise
+        # LinAlgError.  Report an infinite interval so demcmcRoutine treats it as a run-away.
+        col = chain[burnin:, i]
+        if len(col) < 2 or not np.all(np.isfinite(col)) or np.ptp(col) == 0:
+            return np.inf, np.inf
+        try:
+            mode,x_eval,kde1=modekdestimate(chain[:,i],burnin)
+        except np.linalg.LinAlgError:
+            return np.inf, np.inf
         perc1 = intperc(mode,x_eval,kde1)
-        t0_ep=np.abs(perc1[1]-mode)
-        t0_em=np.abs(mode-perc1[0])
+        return np.abs(perc1[1]-mode), np.abs(mode-perc1[0])
+
+    if iT0>-1:
+        t0_ep,t0_em=_interval(iT0)
     else:
         t0_ep=0.0
         t0_em=0.0
-    
+
     if iPer>-1:
-        mode,x_eval,kde1=modekdestimate(chain[:,iPer],burnin)
-        perc1 = intperc(mode,x_eval,kde1)
-        per_ep=np.abs(perc1[1]-mode)
-        per_em=np.abs(mode-perc1[0])
+        per_ep,per_em=_interval(iPer)
     else:
         per_ep=0.0
         per_em=0.0
-        
+
     return t0_ep,t0_em,per_ep,per_em
 
 def modekdestimate(chain,burnin):
