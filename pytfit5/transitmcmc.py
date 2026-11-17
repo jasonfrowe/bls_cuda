@@ -12,6 +12,17 @@ DSCALE_DEFAULT = 1.0
 DSCALE_DEFAULT_ERROR = 0.01
 
 
+class MCMCRunawayError(RuntimeError):
+    """The T0/period chain ran away (or never moved) before the deMCMC stage; no usable chain."""
+
+
+def _n_below(vals, crit):
+    """Number of values below crit.  NaN and inf count as failures; replaces int(np.sum(v[v<c]/v[v<c])),
+    which raised 'cannot convert float NaN to integer' whenever a value was exactly 0."""
+    vals = np.asarray(vals, dtype=float)
+    return int(np.sum(np.isfinite(vals) & (vals < crit)))
+
+
 class priors_class:
     """
     Optional Gaussian (split-normal) soft priors for any transit model parameter.
@@ -402,8 +413,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
     
     runtest=np.array(tpy5.checkperT0(chain,burninf,TPnthin,sol_a,serr))
     print('runtest:',runtest)
-    runtest2 = runtest + 1.0e-5 #add small eps to avoid division by zero.
-    if int(np.sum(runtest2[runtest2<1.0]/runtest2[runtest2<1.0]))==4.0:
+    if _n_below(runtest, 1.0) == 4:
         TPflag=1 #flag for looping until convergence is met.
     else:
         TPflag=0 #run-away
@@ -455,7 +465,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             print('parameter  Rc')
             for i in range(0,len(chain1[1,:])):
                 print('%8s  %.4f' %(str(i),grtest[i]))
-            if int(np.sum(grtest[grtest<buf_converge_crit]/grtest[grtest<buf_converge_crit]))==len(grtest):
+            if _n_below(grtest, buf_converge_crit) == len(grtest):
                 mcmcloop=False
             else:
                 mcmcloop=True
@@ -463,7 +473,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
                 
             runtest=np.array(tpy5.checkperT0(chain1,burninf,TPnthin,sol_a,serr))
             print('runtest:',runtest)
-            if int(np.sum(runtest[runtest<1.0]/runtest[runtest<1.0]))!=4.0:
+            if _n_below(runtest, 1.0) != 4:
                 mcmcloop=False #run-away
                 
             if nloop>=nloopmax: #break if too many loops
@@ -474,10 +484,11 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
         ## Re-use runtest for buffer creation loop.
         #runtest=np.array(tf.checkperT0(chain1,burninf,TPnthin,sol,serr))
         #print('runtest:',runtest)
-        if int(np.sum(runtest[runtest<1.0]/runtest[runtest<1.0]))==4.0:
+        if _n_below(runtest, 1.0) == 4:
             mcmcloop=True #flag for looping until convergence is met.
         else:
-            mcmcloop=False #run-away
+            # run-away while building the buffer: the only chain is the 5000-step test chain
+            raise MCMCRunawayError(f"T0/period chain ran away while building the buffer (runtest={runtest})")
 
         #mcmcloop=True
         nloop=0
@@ -511,7 +522,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             for i in range(0,len(chain1[1,:])):
                 print('%8s  %.4f' %(str(i),grtest[i]))
 
-            if int(np.sum(grtest[grtest<converge_crit]/grtest[grtest<converge_crit]))==len(grtest):
+            if _n_below(grtest, converge_crit) == len(grtest):
                 mcmcloop=False
             else:
                 mcmcloop=True
@@ -527,7 +538,7 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
             #check for run-away Chain.
             runtest=np.array(tpy5.checkperT0(chain1,burninf,nthin,sol_a,serr))
             print('runtest:',runtest)
-            if int(np.sum(runtest[runtest<1.0]/runtest[runtest<1.0]))!=4.0:
+            if _n_below(runtest, 1.0) != 4:
                 mcmcloop=False #run-away
 
             if nloop>=nloopmax: #break if too many loops
@@ -538,3 +549,6 @@ def demcmcRoutine(x, beta, phot, sol_a, serr, params, lnprob, nintg=41, ntt=-1, 
         print("done %s seconds ---" % (time.time() - start_time))
 
         return chain, accept, burnin
+
+    # run-away in the first test chain (previously fell through and returned None)
+    raise MCMCRunawayError(f"T0/period chain ran away in the test chain (runtest={runtest})")
