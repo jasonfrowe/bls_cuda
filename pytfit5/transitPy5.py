@@ -1301,6 +1301,13 @@ def _polyfilter_iterative_binned(phot, tpy5_inputs):
     window on each side. Stops when nothing new is masked or after
     iter_max_iters. Averaging finds transits too shallow per point and
     shorter than iter_min_duration, which the "points" mode misses.
+
+    The noise is measured once, on the first pass, from all points, and the
+    running mean uses unmasked points only. Before, the noise was re-measured
+    on each pass from the unmasked points, so it shrank as dips were removed,
+    and the running mean beside a masked transit included in-transit points;
+    both made every pass mask more (20% of Kepler-8's points after five
+    passes, against ~6% for its transits and padding).
     """
     max_iters = tpy5_inputs.iter_max_iters
     nsig = tpy5_inputs.iter_sigma_threshold
@@ -1316,19 +1323,25 @@ def _polyfilter_iterative_binned(phot, tpy5_inputs):
     kern = np.ones(n) / n
     dil = np.ones(2 * n + 1)
 
+    sig = None
     for iteration in range(max_iters):
         phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag,
                                  tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
                                  multipro=multipro)
         r = (phot.flux_f - np.median(phot.flux_f))[ts]
-        sm = np.convolve(r, kern, mode='same')
         unm = phot.tflag[ts] == 0
         if np.sum(unm) < 10:
             break
+        # running mean of the unmasked points only: averaging in a masked
+        # transit pulled the points beside it down, so each pass flagged
+        # them too and every mask grew by about a window per pass
+        w = unm.astype(float)
+        sm = np.convolve(r * w, kern, mode='same') / np.maximum(np.convolve(w, kern, mode='same'), 1e-12)
         med = np.median(sm[unm])
-        sig = 1.4826 * np.median(np.abs(sm[unm] - med))
-        if not sig > 0:
-            break
+        if sig is None:   # the noise from the first pass only (see docstring)
+            sig = 1.4826 * np.median(np.abs(sm - np.median(sm)))
+            if not sig > 0:
+                break
         flag = (sm - med) < -nsig * sig
         new = (np.convolve(flag.astype(float), dil, mode='same') > 0) & unm
         if np.sum(new) == 0:
@@ -1423,41 +1436,69 @@ def compute_polyrange(iarg, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2, nd
 
     return offset
 
-def polyrange(i, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2):
-    """
-    Computes mask for time series
-    """
-
-    tzero = time[i]
-    t1 = tzero - bbd2
-    t2 = tzero + bbd2
-
-    #Check if there is a gap in our time-span
+def _window(tzero, half, ngap, gaps):
+    """[t1, t2] of half-width ``half`` around tzero, clipped at data gaps."""
+    t1 = tzero - half
+    t2 = tzero + half
     for j in range(ngap):
         if (gaps[j] > t1) and (gaps[j] < tzero):
             t1 = gaps[j]
         if (gaps[j] < t2) and (gaps[j] > tzero):
             t2 = gaps[j]
+    return t1, t2
 
-    #Get data inside time-span that is not a transit.
-    tmask = (time > t1) & (time < t2) & (tflag == 0)
 
-    x = time[tmask]
+def polyrange(i, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2):
+    """
+    Trend at time[i]: a polynomial of order nfitp fitted to the unmasked
+    (tflag == 0) points within +/- bbd2 (not crossing data gaps), evaluated
+    at time[i].
+
+    For an unmasked point this is unchanged: the fit needs more than nfitp + 1
+    points, else their mean. For a masked point (the trend under a transit)
+    the fit needs at least 2 * (nfitp + 1) unmasked points on both sides of
+    it, so the trend is interpolated rather than extrapolated. If the window
+    does not have them it is widened (x2, then x4). If it still does not:
+    - points on both sides, but few: a straight line;
+    - points on one side only: the median of the nearest ones;
+    - no unmasked points at all: the median of every point in the window.
+    (Before, an empty window gave a trend of 0, so the detrended flux came out
+    as flux + median, and a cubic through a handful of points on one side
+    extrapolated to values like 0.4 or 8.)
+    """
+
+    tzero = time[i]
+    t1, t2 = _window(tzero, bbd2, ngap, gaps)
+    inwin1 = (time > t1) & (time < t2)
+    tmask = inwin1 & (tflag == 0)
+
+    if tflag[i] == 0:
+        # an unmasked point has unmasked neighbours: the original rule
+        npt2 = np.sum(tmask)
+        if npt2 > nfitp + 1:
+            return polydetrend(time[tmask], flux[tmask], ferr[tmask], nfitp, tzero)
+        return np.mean(flux[tmask]) if npt2 > 0 else flux[i]
+
+    # a masked point: the trend under it must come from points on both sides
+    min_pts = 2 * (nfitp + 1)
+    for scale in (1, 2, 4):
+        if scale > 1:
+            t1, t2 = _window(tzero, bbd2 * scale, ngap, gaps)
+            tmask = (time > t1) & (time < t2) & (tflag == 0)
+        x = time[tmask]
+        npt2 = x.shape[0]
+        both_sides = np.any(x < tzero) and np.any(x > tzero)
+        if npt2 >= min_pts and both_sides:
+            return polydetrend(x, flux[tmask], ferr[tmask], nfitp, tzero)
+
+    # fallbacks, on the widest window
     y = flux[tmask]
-    z = ferr[tmask]
-
-    npt2 = x.shape[0]
-    # print(t1, t2, npt2, tzero)
-
-    if npt2 > nfitp + 1:
-        offset1 = polydetrend(x, y, z, nfitp, tzero)
-    elif npt2 == 0:
-        offset1 = 0.0
-    else:
-        offset1 = np.mean(y)
-    
-    
-    return offset1
+    if npt2 == 0:
+        return np.median(flux[inwin1]) if np.any(inwin1) else flux[i]
+    if both_sides and npt2 >= 3:
+        return polydetrend(x, y, ferr[tmask], min(nfitp, 1), tzero)   # a line across the masked stretch
+    nearest = np.argsort(np.abs(x - tzero))[:min_pts]
+    return np.median(y[nearest])
 
 def polydetrend(x, y, z, nfitp, x_c):
 
