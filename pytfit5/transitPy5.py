@@ -598,6 +598,9 @@ class tpy5_inputs_class:
                                         # nb grows to max(nbins, P/max_bin_minutes). 0 = fixed nbins
         self.plots    = 1               # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1               # 0 = single thread, 1 = multiprocessing
+        self.bls_engine = "auto"        # BLS kernel: "auto" (compiled C if built, else Numba), "c", "numba"
+        self.bls_isa  = "auto"          # C kernel SIMD variant: auto, avx512, avx2, scalar,
+                                        #   avx512_nodiv, avx512_div, avx2_div, avx2_nodiv
         self.normalize = "iterative_baseline"  # BLS normalization: none, mad, percentile_mad, coverage_mad, iterative_baseline
         self.return_spectrum = False    # If True, return full BLS spectrum (periods, power, freqs)
         self.oneoverf_correction = True # If True, apply baseline subtraction (else leave raw)

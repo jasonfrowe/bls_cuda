@@ -24,6 +24,7 @@ import os
 # Import tpy5_inputs_class from transitPy5
 from pytfit5.transitPy5 import tpy5_inputs_class
 from pytfit5 import period_validation as pval
+from pytfit5 import bls_c
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -47,6 +48,35 @@ class gbls_ans_class:
         self.periods  = None  # Full period array (if return_spectrum=True)
         self.power    = None  # Full power array (if return_spectrum=True)
         self.freqs    = None  # Full frequency array (if return_spectrum=True)
+        self.engine   = None  # Kernel used: "numba" or "c:<variant>"
+
+
+def _available_cpus():
+    """CPUs this process may use (respects Slurm/taskset), not the whole node."""
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+
+
+def _select_engine(tpy5_inputs):
+    """Pick the BLS kernel from tpy5_inputs.bls_engine / bls_isa.
+
+    bls_engine: "auto" (C kernel if built, else Numba), "c" (error if unavailable), "numba".
+    bls_isa:    "auto" or a bls_c variant name (avx512, avx2, avx512_nodiv, avx2_div, ...).
+    Returns (engine, isa) with engine in {"c", "numba"}.
+    """
+    engine = str(getattr(tpy5_inputs, "bls_engine", "auto")).lower()
+    isa = getattr(tpy5_inputs, "bls_isa", "auto")
+    if engine == "numba":
+        return "numba", isa
+    if engine not in ("auto", "c"):
+        raise ValueError(f"bls_engine must be 'auto', 'c' or 'numba', got {engine!r}")
+    if not bls_c.available():
+        if engine == "c":
+            raise RuntimeError(f"bls_engine='c' but the C kernel is unavailable: {bls_c.load_error()}")
+        return "numba", isa
+    if engine == "auto" and getattr(tpy5_inputs, "multipro", 1) != 0 and not bls_c.has_openmp():
+        return "numba", isa  # single-threaded C would lose to the Numba process pool
+    bls_c.resolve_variant(isa)  # validate early (raises on unknown/unsupported isa)
+    return "c", isa
 
 #generic routine to read in files
 def readfile(filename):
@@ -1150,7 +1180,23 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     if max_bin_minutes > 0:
         nbs = np.maximum(nbs, np.ceil((1.0 / freqs) * 1440.0 / max_bin_minutes).astype(np.int64))
 
-    if multipro == 0:
+    engine, isa = _select_engine(tpy5_inputs)
+
+    if engine == "c":
+        # Compiled C/OpenMP kernel (AVX-512/AVX2 dispatch); bit-identical to bls_kernel.
+        # Rare frequencies with Period > baseline use the Numba single-event kernel.
+        duration = np.max(time) - np.min(time)
+        nthreads = 1 if multipro == 0 else _available_cpus()
+        multi = (1.0 / freqs) <= duration
+        p   = np.zeros_like(freqs)
+        jn1 = np.zeros_like(freqs, dtype=np.int32)
+        jn2 = np.zeros_like(freqs, dtype=np.int32)
+        p[multi], jn1[multi], jn2[multi] = bls_c.scan(freqs[multi], nbs[multi], time, flux,
+                                                      Rstar, Mstar, isa=isa, nthreads=nthreads)
+        for i in np.flatnonzero(~multi):
+            p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+
+    elif multipro == 0:
         #Store our answers -- this is for single threads (make this an option!)
         p = np.zeros_like(freqs)
         jn1   = np.zeros_like(freqs, dtype=np.int32)
@@ -1169,7 +1215,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     else: 
         # Store our answers
-        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  # CPUs this process may use (respects Slurm), not the whole node
+        max_processes = _available_cpus()  # CPUs this process may use (respects Slurm), not the whole node
         ndiv = nstep // max_processes + 1
         
         p   = np.zeros((max_processes, ndiv))
@@ -1214,7 +1260,8 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
-    
+    gbls_ans.engine = engine if engine == "numba" else f"c:{bls_c.resolve_variant(isa)}"
+
     # Optionally store full spectrum
     if tpy5_inputs.return_spectrum:
         gbls_ans.periods = periods

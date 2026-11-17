@@ -69,3 +69,4 @@ exotic_ld_data/
 
 # AVX-512 prototype build output
 avx512/libcbls.so
+pytfit5/_cbls*.so

@@ -83,6 +83,8 @@ Unified configuration class for BLS search, detrending, and transit fitting para
 | `minbin` | int | `5` | Minimum bins in transit |
 | `plots` | int | `1` | Plot mode: 0=none, 1=X11, 2=PNG+X11, 3=PNG |
 | `multipro` | int | `1` | Enable multiprocessing (0=off, 1=on) |
+| `bls_engine` | str | `"auto"` | BLS kernel: `"auto"` (compiled C/OpenMP kernel if built, else Numba), `"c"`, `"numba"`. Both give identical results |
+| `bls_isa` | str | `"auto"` | SIMD variant for the C kernel: `auto` (best the CPU supports), `avx512`, `avx2`, `scalar`, or explicitly `avx512_nodiv`, `avx512_div`, `avx2_div`, `avx2_nodiv` |
 | `normalize` | str | `"iterative_baseline"` | Normalization mode (see below) |
 | `return_spectrum` | bool | `False` | If True, return full BLS spectrum in result |
 | `oneoverf_correction` | bool | `False` | Enable 1/f baseline correction |
