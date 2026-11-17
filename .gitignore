@@ -66,3 +66,6 @@ env.bak/
 venv.bak/
 
 exotic_ld_data/
+
+# AVX-512 prototype build output
+avx512/libcbls.so
