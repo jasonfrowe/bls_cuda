@@ -163,3 +163,14 @@ def test_dips_only_end_to_end(engine, multipro):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_auto_variant_by_vendor(monkeypatch):
+    """auto picks avx512_div on AMD, avx512_nodiv elsewhere (when AVX-512 is supported)."""
+    sup = bls_c.supported_variants()
+    if "avx512_div" not in sup:
+        pytest.skip("no AVX-512 on this CPU")
+    monkeypatch.setattr(bls_c, "cpu_vendor", lambda: "AuthenticAMD")
+    assert bls_c.resolve_variant("auto") == "avx512_div"
+    monkeypatch.setattr(bls_c, "cpu_vendor", lambda: "GenuineIntel")
+    assert bls_c.resolve_variant("auto") == "avx512_nodiv"

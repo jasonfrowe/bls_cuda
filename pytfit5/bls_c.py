@@ -4,7 +4,11 @@ The extension is optional: if it was not built, ``available()`` returns False
 and bls_cpu.bls() falls back to the Numba kernels.
 
 Variants (``isa`` argument):
-    "auto"          best supported: avx512_nodiv > avx2_div > scalar
+    "auto"          best supported for this CPU:
+                    Intel/other: avx512_nodiv > avx2_div > scalar
+                    AMD:         avx512_div   > avx2_div > scalar
+                    (Zen 4, EPYC 9654: avx512_div 1.64 s vs avx512_nodiv 1.85 s for a
+                    full Kepler search; Skylake-SP Xeon: nodiv faster)
     "avx512"        alias for avx512_nodiv
     "avx2"          alias for avx2_div
     "scalar", "avx2_div", "avx2_nodiv", "avx512_div", "avx512_nodiv"
@@ -19,6 +23,7 @@ import numpy as np
 VARIANTS = {"scalar": 0, "avx2_div": 1, "avx2_nodiv": 2, "avx512_div": 3, "avx512_nodiv": 4}
 ALIASES = {"avx512": "avx512_nodiv", "avx2": "avx2_div"}
 AUTO_ORDER = ("avx512_nodiv", "avx2_div", "scalar")
+AUTO_ORDER_AMD = ("avx512_div", "avx2_div", "scalar")
 
 _lib = None
 _load_error = None
@@ -78,6 +83,18 @@ def supported_variants():
     return [n for n, v in VARIANTS.items() if (mask >> v) & 1]
 
 
+def cpu_vendor():
+    """CPU vendor string from /proc/cpuinfo ("AuthenticAMD", "GenuineIntel", ...; "" if unknown)."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                if line.startswith("vendor_id"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def resolve_variant(isa="auto"):
     """Map an isa request to a concrete, supported variant name (raises if impossible)."""
     sup = supported_variants()
@@ -85,7 +102,8 @@ def resolve_variant(isa="auto"):
         raise RuntimeError(f"C BLS kernel unavailable: {load_error()}")
     isa = (isa or "auto").lower()
     if isa == "auto":
-        return next(v for v in AUTO_ORDER if v in sup)
+        order = AUTO_ORDER_AMD if cpu_vendor() == "AuthenticAMD" else AUTO_ORDER
+        return next(v for v in order if v in sup)
     name = ALIASES.get(isa, isa)
     if name not in VARIANTS:
         raise ValueError(f"unknown bls_isa {isa!r}; choose auto, "
