@@ -1114,6 +1114,10 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     multipro = tpy5_inputs.multipro
     nbins    = getattr(tpy5_inputs, "nbins", 2000)
     max_bin_minutes = getattr(tpy5_inputs, "max_bin_minutes", 0.0)
+    # dips_only: only boxes with flux below the median (transits) count. False = classic
+    # s^2 BLS, which ranks brightenings equally (about half of noise-only top peaks).
+    dips_only = bool(getattr(tpy5_inputs, "dips_only", False))
+    smax = 0.0 if dips_only else np.inf
     
     if (time.shape[0] < 2) or (flux.shape[0] < 2):
         time, flux = readfile(filename)
@@ -1192,9 +1196,10 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
         jn1 = np.zeros_like(freqs, dtype=np.int32)
         jn2 = np.zeros_like(freqs, dtype=np.int32)
         p[multi], jn1[multi], jn2[multi] = bls_c.scan(freqs[multi], nbs[multi], time, flux,
-                                                      Rstar, Mstar, isa=isa, nthreads=nthreads)
+                                                      Rstar, Mstar, isa=isa, nthreads=nthreads,
+                                                      dips_only=dips_only)
         for i in np.flatnonzero(~multi):
-            p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+            p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
 
     elif multipro == 0:
         #Store our answers -- this is for single threads (make this an option!)
@@ -1209,9 +1214,9 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
         for i in tqdm(range(nstep)):
             if (1.0 / freqs[i]) > duration:
-                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
             else:
-                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
 
     else: 
         # Store our answers
@@ -1229,7 +1234,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_processes) as executor:
             futures = {executor.submit(compute_bls_kernel, iarg[i], freqs, time, flux, \
-                                       nbs, Rstar, Mstar, ndiv): i for i in range(iarg.shape[0])}
+                                       nbs, Rstar, Mstar, ndiv, smax): i for i in range(iarg.shape[0])}
             
             for future in concurrent.futures.as_completed(futures):
                 i = futures[future]
@@ -1401,7 +1406,7 @@ def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=
 
 
 @jit(nopython=True, cache=True)
-def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
+def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
     """
     BLS kernel optimized for single event searches (Period > Duration).
     """
@@ -1491,14 +1496,14 @@ def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
                 dfac = kk * (npt - kk)
                 if dfac > 0:
                     pow1 = s*s / dfac
-                    if pow1 > p:
+                    if s < smax and pow1 > p:
                         p = pow1
                         jn1 = i
                         jn2 = j
                         
     return p, jn1, jn2
 
-def compute_bls_kernel(iarg, freqs, time, flux, nbs, Rstar, Mstar, ndiv):
+def compute_bls_kernel(iarg, freqs, time, flux, nbs, Rstar, Mstar, ndiv, smax=np.inf):
     
     p = np.zeros((ndiv))
     jn1 = np.zeros((ndiv), dtype = np.int32)
@@ -1511,15 +1516,15 @@ def compute_bls_kernel(iarg, freqs, time, flux, nbs, Rstar, Mstar, ndiv):
     for i in iarg:
         # Check if Period > Duration
         if (1.0 / freqs[i]) > duration:
-            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
         else:
-            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
         j += 1
         
     return p, jn1, jn2
 
 @jit(nopython=True, cache=True, error_model='numpy')
-def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
+def bls_kernel(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
     """
     BLS kernel for one trial frequency (Period < Duration).
 
@@ -1606,7 +1611,7 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
                 K[i] = kk
                 dfac = kk * (fnpt - kk)
                 pow1 = s * s / dfac
-                better = (kk > fkkmi) & (dfac > 0.0) & (pow1 > B[i])
+                better = (kk > fkkmi) & (dfac > 0.0) & (s < smax) & (pow1 > B[i])
                 B[i] = pow1 if better else B[i]
                 E[i] = i + m if better else E[i]
 
@@ -1623,7 +1628,7 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
     return p, jn1, jn2
 
 @jit(nopython=True, cache=True)
-def bls_kernel_reference(freq, time, flux, nb, Rstar, Mstar):
+def bls_kernel_reference(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
     """Original BLS kernel, kept to validate bls_kernel against."""
 
     npt = time.shape[0]
@@ -1694,7 +1699,7 @@ def bls_kernel_reference(freq, time, flux, nb, Rstar, Mstar):
                 if dfac > 0 :
                     pow1 = s*s / dfac
 
-                    if pow1 > p:
+                    if s < smax and pow1 > p:
                         p = pow1
                         jn1 = i
                         jn2 = j        

@@ -42,6 +42,11 @@ def _load():
                                   ctypes.c_int, ctypes.c_double, ctypes.c_double, ctypes.c_int,
                                   ctypes.c_int, dp, i32p, i32p]
         lib.cbls_scan.restype = ctypes.c_int
+        if hasattr(lib, "cbls_scan_ex"):   # absent in builds older than dips_only
+            lib.cbls_scan_ex.argtypes = [dp, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, dp, dp,
+                                         ctypes.c_int, ctypes.c_double, ctypes.c_double, ctypes.c_int,
+                                         ctypes.c_int, ctypes.c_double, dp, i32p, i32p]
+            lib.cbls_scan_ex.restype = ctypes.c_int
         lib.cbls_supported_variants.restype = ctypes.c_int
         lib.cbls_has_openmp.restype = ctypes.c_int
         _lib = lib
@@ -90,10 +95,12 @@ def resolve_variant(isa="auto"):
     return name
 
 
-def scan(freqs, nbs, time, flux, Rstar=1.0, Mstar=1.0, isa="auto", nthreads=0):
+def scan(freqs, nbs, time, flux, Rstar=1.0, Mstar=1.0, isa="auto", nthreads=0, dips_only=False):
     """BLS over all frequencies (Period < baseline path of bls_cpu.bls_kernel).
 
     nthreads <= 0 uses OpenMP's default (OMP_NUM_THREADS or all CPUs).
+    dips_only=True counts only boxes whose (median-centred) flux sum is negative,
+    i.e. transits; False keeps both signs (classic s^2 BLS).
     Returns p (float64), jn1, jn2 (int32), same as looping bls_kernel.
     """
     variant = resolve_variant(isa)
@@ -108,10 +115,16 @@ def scan(freqs, nbs, time, flux, Rstar=1.0, Mstar=1.0, isa="auto", nthreads=0):
     jn2 = np.zeros(freqs.size, dtype=np.int32)
     dp = ctypes.POINTER(ctypes.c_double)
     i32p = ctypes.POINTER(ctypes.c_int32)
-    rc = _lib.cbls_scan(freqs.ctypes.data_as(dp), nbs.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
-                        freqs.size, time.ctypes.data_as(dp), flux.ctypes.data_as(dp), time.size,
-                        float(Rstar), float(Mstar), VARIANTS[variant], int(nthreads),
-                        p.ctypes.data_as(dp), jn1.ctypes.data_as(i32p), jn2.ctypes.data_as(i32p))
+    args = (freqs.ctypes.data_as(dp), nbs.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+            freqs.size, time.ctypes.data_as(dp), flux.ctypes.data_as(dp), time.size,
+            float(Rstar), float(Mstar), VARIANTS[variant], int(nthreads))
+    out = (p.ctypes.data_as(dp), jn1.ctypes.data_as(i32p), jn2.ctypes.data_as(i32p))
+    if hasattr(_lib, "cbls_scan_ex"):
+        rc = _lib.cbls_scan_ex(*args, 0.0 if dips_only else np.inf, *out)
+    elif dips_only:
+        raise RuntimeError("the built C kernel predates dips_only; rebuild pytfit5 (pip install -e .)")
+    else:
+        rc = _lib.cbls_scan(*args, *out)
     if rc != 0:
         raise RuntimeError(f"cbls_scan failed (code {rc})")
     return p, jn1, jn2

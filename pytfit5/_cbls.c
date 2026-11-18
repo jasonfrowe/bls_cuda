@@ -132,7 +132,8 @@ static void bin_avx512(double freq, const double *time, const double *flux, int 
 
 /* -------------------------------------------------------------- search -- */
 static void search_scalar(const double *ibi, const double *y, int nb, int npt,
-                          int kmi, int kma, int kkmi, double *p_, int *jn1_, int *jn2_)
+                          int kmi, int kma, int kkmi, double smax,
+                          double *p_, int *jn1_, int *jn2_)
 {
     double p = 0.0; int jn1 = 0, jn2 = 0;
     double fnpt = npt, fkkmi = kkmi;
@@ -143,7 +144,7 @@ static void search_scalar(const double *ibi, const double *y, int nb, int npt,
             if (m + 1 > kmi) {
                 double dfac = kk * (fnpt - kk);
                 double pw = s * s / dfac;
-                if (kk > fkkmi && dfac > 0.0 && pw > B) { B = pw; E = i + m; }
+                if (kk > fkkmi && dfac > 0.0 && s < smax && pw > B) { B = pw; E = i + m; }
             }
         }
         if (B > p) { p = B; jn1 = i; jn2 = E; }
@@ -155,10 +156,11 @@ static void search_scalar(const double *ibi, const double *y, int nb, int npt,
 #define NV2 3 /* ymm vectors per block (4 lanes each) */
 __attribute__((target("avx2,fma")))
 static inline void search_avx2_impl(const double *ibi, const double *y, int nb, int npt,
-                                    int kmi, int kma, int kkmi, const int usediv,
+                                    int kmi, int kma, int kkmi, const int usediv, double smax,
                                     double *p_, int *jn1_, int *jn2_)
 {
     const __m256d vnpt = _mm256_set1_pd((double)npt);
+    const __m256d vsmax = _mm256_set1_pd(smax);
     const __m256d vkkmi = _mm256_set1_pd((double)kkmi);
     const __m256d zero = _mm256_setzero_pd();
     double p = 0.0; int jn1 = 0, jn2 = 0;
@@ -185,6 +187,7 @@ static inline void search_avx2_impl(const double *ibi, const double *y, int nb, 
                 __m256d s2 = _mm256_mul_pd(s, s);
                 __m256d ok = _mm256_and_pd(_mm256_cmp_pd(kk, vkkmi, _CMP_GT_OQ),
                                            _mm256_cmp_pd(dfac, zero, _CMP_GT_OQ));
+                ok = _mm256_and_pd(ok, _mm256_cmp_pd(s, vsmax, _CMP_LT_OQ));
                 __m256d better;
                 if (usediv) {
                     __m256d pw = _mm256_div_pd(s2, dfac);
@@ -216,10 +219,11 @@ static inline void search_avx2_impl(const double *ibi, const double *y, int nb, 
 #define NV5 4 /* zmm vectors per block (8 lanes each) */
 __attribute__((target("avx512f,avx512dq")))
 static inline void search_avx512_impl(const double *ibi, const double *y, int nb, int npt,
-                                      int kmi, int kma, int kkmi, const int usediv,
+                                      int kmi, int kma, int kkmi, const int usediv, double smax,
                                       double *p_, int *jn1_, int *jn2_)
 {
     const __m512d vnpt = _mm512_set1_pd((double)npt);
+    const __m512d vsmax = _mm512_set1_pd(smax);
     const __m512d vkkmi = _mm512_set1_pd((double)kkmi);
     const __m512d zero = _mm512_setzero_pd();
     double p = 0.0; int jn1 = 0, jn2 = 0;
@@ -246,6 +250,7 @@ static inline void search_avx512_impl(const double *ibi, const double *y, int nb
                 __m512d s2 = _mm512_mul_pd(s, s);
                 __mmask8 ok = _mm512_cmp_pd_mask(kk, vkkmi, _CMP_GT_OQ);
                 ok = _mm512_mask_cmp_pd_mask(ok, dfac, zero, _CMP_GT_OQ);
+                ok = _mm512_mask_cmp_pd_mask(ok, s, vsmax, _CMP_LT_OQ);
                 __mmask8 better;
                 if (usediv) {
                     __m512d pw = _mm512_div_pd(s2, dfac);
@@ -275,20 +280,20 @@ static inline void search_avx512_impl(const double *ibi, const double *y, int nb
 }
 
 __attribute__((target("avx2,fma")))
-static void search_avx2_div(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double *p, int *j1, int *j2)
-{ search_avx2_impl(a, b, nb, npt, kmi, kma, kkmi, 1, p, j1, j2); }
+static void search_avx2_div(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double smax, double *p, int *j1, int *j2)
+{ search_avx2_impl(a, b, nb, npt, kmi, kma, kkmi, 1, smax, p, j1, j2); }
 __attribute__((target("avx2,fma")))
-static void search_avx2_nodiv(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double *p, int *j1, int *j2)
-{ search_avx2_impl(a, b, nb, npt, kmi, kma, kkmi, 0, p, j1, j2); }
+static void search_avx2_nodiv(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double smax, double *p, int *j1, int *j2)
+{ search_avx2_impl(a, b, nb, npt, kmi, kma, kkmi, 0, smax, p, j1, j2); }
 __attribute__((target("avx512f,avx512dq")))
-static void search_avx512_div(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double *p, int *j1, int *j2)
-{ search_avx512_impl(a, b, nb, npt, kmi, kma, kkmi, 1, p, j1, j2); }
+static void search_avx512_div(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double smax, double *p, int *j1, int *j2)
+{ search_avx512_impl(a, b, nb, npt, kmi, kma, kkmi, 1, smax, p, j1, j2); }
 __attribute__((target("avx512f,avx512dq")))
-static void search_avx512_nodiv(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double *p, int *j1, int *j2)
-{ search_avx512_impl(a, b, nb, npt, kmi, kma, kkmi, 0, p, j1, j2); }
+static void search_avx512_nodiv(const double *a, const double *b, int nb, int npt, int kmi, int kma, int kkmi, double smax, double *p, int *j1, int *j2)
+{ search_avx512_impl(a, b, nb, npt, kmi, kma, kkmi, 0, smax, p, j1, j2); }
 #endif /* CBLS_X86 */
 
-typedef void (*search_fn)(const double *, const double *, int, int, int, int, int, double *, int *, int *);
+typedef void (*search_fn)(const double *, const double *, int, int, int, int, int, double, double *, int *, int *);
 typedef void (*bin_fn)(double, const double *, const double *, int, int, double *, double *, int32_t *, double *);
 
 /* ------------------------------------------------------------ public API -- */
@@ -318,10 +323,13 @@ int cbls_has_openmp(void)
 }
 
 /* Returns 0 on success, -1 if the variant is not supported on this CPU,
- * -2 on allocation failure. */
-int cbls_scan(const double *freqs, const int64_t *nbs, int nfreq, const double *time,
-              const double *flux, int npt, double Rstar, double Mstar, int variant,
-              int nthreads, double *p, int32_t *jn1, int32_t *jn2)
+ * -2 on allocation failure.
+ * A box counts only if its flux sum s < smax: smax = 0 keeps dips only (flux is
+ * median-centred, so a transit has s < 0); smax = +INFINITY keeps both signs,
+ * i.e. the classic s^2 statistic (bit-identical to cbls_scan). */
+int cbls_scan_ex(const double *freqs, const int64_t *nbs, int nfreq, const double *time,
+                 const double *flux, int npt, double Rstar, double Mstar, int variant,
+                 int nthreads, double smax, double *p, int32_t *jn1, int32_t *jn2)
 {
     if (variant < 0 || variant > 4 || !((cbls_supported_variants() >> variant) & 1))
         return -1;
@@ -359,13 +367,22 @@ int cbls_scan(const double *freqs, const int64_t *nbs, int nfreq, const double *
             bfn(freqs[i], time, flux, npt, nb, ibi, y, jbin, pairs);
             int kmi, kma, kkmi, a, b;
             limits(freqs[i], nb, npt, Rstar, Mstar, &kmi, &kma, &kkmi);
-            fn(ibi, y, nb, npt, kmi, kma, kkmi, &p[i], &a, &b);
+            fn(ibi, y, nb, npt, kmi, kma, kkmi, smax, &p[i], &a, &b);
             jn1[i] = a;
             jn2[i] = b;
         }
         free(ibi); free(y); free(pairs); free(jbin);
     }
     return err ? -2 : 0;
+}
+
+/* Original entry point (both signs), kept for ABI compatibility. */
+int cbls_scan(const double *freqs, const int64_t *nbs, int nfreq, const double *time,
+              const double *flux, int npt, double Rstar, double Mstar, int variant,
+              int nthreads, double *p, int32_t *jn1, int32_t *jn2)
+{
+    return cbls_scan_ex(freqs, nbs, nfreq, time, flux, npt, Rstar, Mstar, variant,
+                        nthreads, INFINITY, p, jn1, jn2);
 }
 
 #ifdef CBLS_PYMODULE

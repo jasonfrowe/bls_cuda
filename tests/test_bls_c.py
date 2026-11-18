@@ -105,5 +105,61 @@ def test_real_lightcurve():
             np.testing.assert_array_equal(g, r)
 
 
+# ---------------------------------------------------------------- dips_only --
+def numba_loop_dips(freqs, t, f, nbs, kernel=None):
+    k = kernel or bls_cpu.bls_kernel
+    out = np.array([k(fr, t, f, nb, 1.0, 1.0, 0.0) for fr, nb in zip(freqs, nbs)])
+    return out[:, 0], out[:, 1].astype(np.int32), out[:, 2].astype(np.int32)
+
+
+def test_dips_only_numba_matches_reference():
+    t, f = synthetic_lc(depth=0.0, seed=7)          # noise only: brightenings compete
+    freqs, nb = grid(t)
+    freqs = freqs[::11]
+    nbs = np.full(freqs.size, nb, dtype=np.int64)
+    a = numba_loop_dips(freqs, t, f, nbs)
+    b = numba_loop_dips(freqs, t, f, nbs, kernel=bls_cpu.bls_kernel_reference)
+    for r, g in zip(b, a):
+        np.testing.assert_array_equal(g, r)
+    both = numba_loop(freqs, t, f, nbs)
+    assert np.all(a[0] <= both[0]) and np.any(a[0] < both[0])
+
+
+@pytest.mark.parametrize("variant", list(bls_c.VARIANTS))
+def test_dips_only_scan_matches_numba(variant):
+    if variant not in bls_c.supported_variants():
+        pytest.skip(f"{variant} not supported on this CPU")
+    t, f = synthetic_lc(depth=0.0, seed=7)
+    freqs, nb = grid(t)
+    freqs = freqs[::7]
+    nbs = np.full(freqs.size, nb, dtype=np.int64)
+    nbs[::3] += 37
+    ref = numba_loop_dips(freqs, t, f, nbs)
+    for nthreads in (1, 0):
+        got = bls_c.scan(freqs, nbs, t, f, isa=variant, nthreads=nthreads, dips_only=True)
+        for r, g in zip(ref, got):
+            np.testing.assert_array_equal(g, r)
+
+
+@pytest.mark.parametrize("engine,multipro", [("numba", 0), ("c", 1)])
+def test_dips_only_end_to_end(engine, multipro):
+    """With dips_only every top peak is a dip (positive depth); without it, about half are not."""
+    neg = {False: 0, True: 0}
+    for seed in range(8):
+        t, f = synthetic_lc(depth=0.0, seed=100 + seed)
+        for dips in (False, True):
+            inp = tpy5_inputs_class()
+            inp.plots, inp.multipro, inp.nbins, inp.bls_engine = 0, multipro, 500, engine
+            inp.dips_only = dips
+            a = bls_cpu.bls(inp, time=t.copy(), flux=f.copy())
+            neg[dips] += a.depth < 0
+    assert neg[True] == 0
+    assert neg[False] > 0
+    t, f = synthetic_lc()                            # a real transit is still found
+    inp = tpy5_inputs_class()
+    inp.plots, inp.multipro, inp.nbins, inp.bls_engine, inp.dips_only = 0, multipro, 500, engine, True
+    assert abs(bls_cpu.bls(inp, time=t, flux=f).bper - 3.217) < 0.01
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
