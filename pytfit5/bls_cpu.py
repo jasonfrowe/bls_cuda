@@ -49,6 +49,8 @@ class gbls_ans_class:
         self.power    = None  # Full power array (if return_spectrum=True)
         self.freqs    = None  # Full frequency array (if return_spectrum=True)
         self.engine   = None  # Kernel used: "numba" or "c:<variant>"
+        self.single   = False # True if the result is a single event (bls_pulse: the pulse
+                              # search won; bls: best period longer than the time span)
 
 
 def _available_cpus():
@@ -1266,6 +1268,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
     gbls_ans.engine = engine if engine == "numba" else f"c:{bls_c.resolve_variant(isa)}"
+    gbls_ans.single = bool(bper > np.max(time) - np.min(time))
 
     # Optionally store full spectrum
     if tpy5_inputs.return_spectrum:
@@ -1820,7 +1823,9 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
     
     If Pulse Search wins:
         - Returns a gbls_ans_class object with:
-            - bper = 0 (indicating single event)
+            - single = True
+            - bper = period estimated from the duration and stellar density
+              (always longer than the time span)
             - epo = pulse t0
             - tdur = pulse duration
             - depth = pulse depth
@@ -1927,6 +1932,7 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
         final_ans.tdur = pulse_res['duration']
         final_ans.depth = -pulse_res['depth']
         final_ans.bpower = pulse_res['snr'] # Use SNR as power proxy
+        final_ans.single = True
         is_periodic = False
         
     # 4. Plotting
