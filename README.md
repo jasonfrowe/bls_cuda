@@ -82,6 +82,8 @@ With `multipro = 1` (the default), detrending and the Numba BLS kernel use a pro
 See [`examples/roman_example.ipynb`](examples/roman_example.ipynb) for an end-to-end example on a
 simulated Roman light curve (simulation, detrending, BLS search, checks, transit fit and DE-MCMC,
 with the methods explained), and [API.md](API.md) for the full reference.
+Older notebooks, written for earlier versions of the API, are kept unmaintained in
+[`examples/archive/`](examples/archive/).
 
 ## Searches
 
