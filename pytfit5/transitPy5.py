@@ -1104,9 +1104,22 @@ def run_cutoutliers(phot, tpy5_inputs):
     
 def cutoutliers(x, y, nsampmax = 3, sigma = 3.0, direction = "both"):
     """
-    Uses derivatives to cut outliers.
+    Uses derivatives to cut outliers (compiled; see pytfit5/detrend.py).
     direction = "both": cut points far above or below both neighbours.
     direction = "up":   cut only points far above both neighbours.
+
+    Point i is cut if it differs from both neighbours by more than sigma times the
+    median absolute point-to-point difference within +/- nsampmax points.
+    """
+    from pytfit5 import detrend
+    return detrend.cutoutliers(x, y, nsampmax, sigma, direction)
+
+
+def cutoutliers_reference(x, y, nsampmax = 3, sigma = 3.0, direction = "both"):
+    """
+    Original pure-Python cutoutliers (reference for tests). Near both ends of the light
+    curve (first and last nsampmax points) its scatter estimate included stale samples;
+    the compiled version uses only the samples in range.
     """
 
     threshold = 0.0005 #Fixed threshold, if sigma <= 0
@@ -1362,6 +1375,37 @@ def _polyfilter_iterative_binned(phot, tpy5_inputs):
 
 def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
     """
+    Detrend with a moving polynomial (Kepler TRANSITFIT5 routines), compiled with Numba.
+
+    At each point, a polynomial of order nfitp is fitted to the unmasked (tflag == 0)
+    points within +/- boxbin/2, not crossing gaps longer than gapsize, with iterative
+    4-sigma clipping (weights 1/ferr^2), and evaluated at that point. Masked points get a
+    trend interpolated from both sides (see polyrange). Same results as
+    polyfilter_reference (the original pure-Python version), about two orders of magnitude
+    faster; see pytfit5/detrend.py.
+
+    Parameters:
+    time (np.array) : times series, usually in days (need not be sorted)
+    flux (np.array) : relative flux
+    ferr (np.array) : uncertainty on relative flux
+    tflag (np.array): 1 = masked (e.g. in transit), excluded from the fits
+    boxbin (float)  : full width of detrending window.  Units should match time.
+    nfitp  (int)    : order of polynomial fit
+    gapsize (float) : identifying boundaries to not detrend across.  Units should match time.
+    multipro (int)  : 0 = one thread; 1 = Numba threads (NUMBA_NUM_THREADS)
+
+    Returns:
+    flux_f (np.array) : detrended time-series (flux - trend + median(flux))
+    """
+    from pytfit5 import detrend
+    offset = detrend.polyfilter_trend(time, flux, ferr, tflag, boxbin, nfitp, gapsize,
+                                      multipro=multipro)
+    return np.asarray(flux) - offset + np.median(flux)
+
+
+def polyfilter_reference(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
+    """
+    Original pure-Python polyfilter (reference for tests; slow).
     Computes detended data based on Kepler TRANSITFIT5 routines
 
     Parameters:
