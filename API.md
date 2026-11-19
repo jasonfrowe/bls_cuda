@@ -659,5 +659,5 @@ https://github.com/jasonfrowe/bls_cuda
 ## Support
 
 - Issues: https://github.com/jasonfrowe/bls_cuda/issues
-- Interactive examples: `pytfit5_example.ipynb`
+- Interactive example: `examples/roman_example.ipynb`
 - Contact: jason@jasonrowe.org

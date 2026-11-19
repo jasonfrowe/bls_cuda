@@ -79,8 +79,9 @@ With `multipro = 1` (the default), detrending and the Numba BLS kernel use a pro
 (not a notebook), put the code under `if __name__ == "__main__":`; Python 3.14 starts workers with
 `forkserver` and fails without it.
 
-See `pytfit5_example.ipynb` for a complete walk-through (data, detrending, BLS, fitting, MCMC,
-injection tests) and [API.md](API.md) for the full reference.
+See [`examples/roman_example.ipynb`](examples/roman_example.ipynb) for an end-to-end example on a
+simulated Roman light curve (simulation, detrending, BLS search, checks, transit fit and DE-MCMC,
+with the methods explained), and [API.md](API.md) for the full reference.
 
 ## Searches
 
