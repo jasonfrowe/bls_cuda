@@ -142,6 +142,13 @@ preserved) to `phot.flux_f`. Points with `phot.tflag == 1` are excluded from the
 `run_cutoutliers(phot, inputs)` flags outliers in `phot.icut`. `cut_direction = "up"` cuts only
 upward outliers (flares, cosmic rays), so that transits lasting one or two cadences are kept.
 
+The detrender and the outlier cut are compiled with Numba (`pytfit5/detrend.py`). One 70.5-day Roman
+season (8,391 points) is detrended with both production windows (3 d and 1 d, cubic, binned masking)
+in about 0.8 s on one core, against 56 s for the original Python version, with the same results to
+~1e-10 of the noise. The original versions are kept as `polyfilter_reference` and
+`cutoutliers_reference`. The first call in a new environment compiles the kernels (~7 s); they are
+cached afterwards.
+
 ## Synthetic light curves
 
 ```python
@@ -204,6 +211,9 @@ Jason Rowe - jason@jasonrowe.org
 
 ## Change log
 
+- 2026/11/19: Detrender (`polyfilter`) and outlier cut compiled with Numba: 60-100x faster, same
+  results; `multipro=1` uses threads instead of a process pool. The outlier cut no longer uses stale
+  samples for its scatter estimate in the first and last `nsampmax` points.
 - 2026/11/19: `single` flag on search results; period validation fixed (epoch search, robust SNR,
   per-transit depths, SNR-gain threshold for aliases); README and API.md updated.
 - 2026/11/18: C/OpenMP BLS kernel with run-time AVX-512/AVX2 selection (`bls_engine`, `bls_isa`);

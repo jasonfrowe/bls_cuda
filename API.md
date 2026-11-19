@@ -130,13 +130,29 @@ Returns a `phot_class` (`flux_f` empty until detrending).
 ### `run_cutoutliers(phot, inputs)`
 
 Flag outliers in `phot.icut` (derivative-based cut with `nsampmax` and `dsigclip`, direction
-`cut_direction`).
+`cut_direction`). A point is cut if it differs from both neighbours, in the same direction, by more
+than `dsigclip` × the median absolute point-to-point difference within ±`nsampmax` points. Uses
+`cutoutliers(time, flux, nsampmax, sigma, direction)` (compiled; data in time order);
+`cutoutliers_reference` is the original version, which used stale samples for the scatter in the
+first and last `nsampmax` points.
 
 ### `run_polyfilter(phot, inputs)`
 
 Polynomial detrending (order `nfitp`, window `boxbin` days, not across gaps > `gapsize`), ignoring
 points with `tflag == 1`. Writes `phot.flux_f` = flux − trend + median(flux), i.e. in the units of
-the input.
+the input. Calls `polyfilter`.
+
+### `polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro=1)`
+
+The detrender (compiled with Numba, `pytfit5/detrend.py`). At each point, a polynomial of order
+`nfitp` is fitted, with weights 1/`ferr`², to the unmasked points within ±`boxbin`/2 that are not
+across a gap longer than `gapsize`, with iterative 4σ clipping (up to 10 iterations), and evaluated
+at that point. For a masked point, the fit needs at least 2(`nfitp`+1) unmasked points on both sides;
+otherwise the window is widened ×2 and ×4, then a straight line across the masked stretch, the
+median of the nearest points (one side only), or the median of the window is used. `time` need not
+be sorted. `multipro=1` runs on Numba threads (`NUMBA_NUM_THREADS`), `0` on one thread. Returns
+flux − trend + median(flux). `polyfilter_reference` is the original pure-Python version (same
+results, 60-100× slower).
 
 ### `run_polyfilter_iterative(phot, inputs)`
 
@@ -619,8 +635,10 @@ long period.
   the whole node. For many light curves, it is usually faster to run one light curve per core with
   `multipro=0`.
 - **Grid.** Run time scales roughly with `ofac` and with the number of phase bins.
+- **Detrending.** Compiled: about 0.8 s per Roman season for both production windows on one core
+  (was 56 s), so it is now a few percent of the pipeline time instead of a third to a half.
 - **First call.** Numba compiles its kernels on first use and caches them (`cache=True`), so the first
-  search in a new environment is slower.
+  search and detrending in a new environment are slower (detrender: ~7 s).
 
 ---
 
