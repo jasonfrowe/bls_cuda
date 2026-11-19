@@ -174,6 +174,9 @@ The `tpy5_inputs_class()` is a **unified configuration class** that controls all
 - `minbin` (int, default: 5): Minimum number of bins in transit
 - `plots` (int, default: 1): Plot mode (0=none, 1=display, 2=save+display, 3=save only)
 - `multipro` (int, default: 1): Enable multiprocessing (0=single thread, 1=parallel)
+- `bls_engine` (str, default: "auto"): BLS kernel. "auto" uses the compiled C/OpenMP kernel (built by `pip install`, AVX-512/AVX2 selected at run time, ~1.5-2x faster) when available and falls back to Numba; "c" or "numba" force one. Results are identical
+- `bls_isa` (str, default: "auto"): SIMD variant for the C kernel (auto = avx512_div on AMD, avx512_nodiv otherwise; avx512, avx2, scalar, avx512_nodiv, avx512_div, avx2_div, avx2_nodiv)
+- `dips_only` (bool, default: False): count only boxes whose flux is below the median (transits). False is the classic BLS statistic (s²), which ranks brightenings equally; on noise about half of the top peaks are then brightenings. The single-event pulse search is always dips-only
 - `normalize` (str, default: "iterative_baseline"): BLS normalization method
 - `return_spectrum` (bool, default: False): Return full BLS spectrum arrays
 - `oneoverf_correction` (bool, default: True): Apply 1/f noise correction for long periods
