@@ -1,3 +1,6 @@
+"""Occultation of a limb-darkened star: uniform and quadratic (Mandel & Agol 2002), and the
+small-planet approximation for the four-parameter non-linear law. Ported from occultquad.f
+and mandelagol.f of TransitFit5; the elliptic integrals use Bulirsch's cel (elliptic_int.py)."""
 import numpy as np
 from pytfit5.elliptic_int import ellE, ellK, ellPi
 from numba import njit

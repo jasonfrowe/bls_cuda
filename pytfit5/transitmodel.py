@@ -42,8 +42,8 @@ class transit_model_class:
         self.per = [1.0]    # Orbital period (days)
         self.bb  = [0.5]    # Impact parameter (NOT the square of b, I should probably change its name)
         self.rdr = [0.1]    # Rp/R*
-        self.ecw = [0.0]    # sqrt(e)cos(w)
-        self.esw = [0.0]    # sqrt(e)sin(w)
+        self.ecw = [0.0]    # sqrt(e)cos(omega), omega = argument of periastron (RV convention:
+        self.esw = [0.0]    # sqrt(e)sin(omega)    transit at true anomaly f = pi/2 - omega)
         self.krv = [0.0]    # RV amplitude (m/s)
         self.ted = [0.0]    # Thermal eclipse depth (ppm)
         self.ell = [0.0]    # Ellipsodial variations (ppm)
@@ -239,21 +239,23 @@ def _transitModel(sol, time, itime, nintg, ntt, tobs, omc):
         # Read parameters for the planet
         epoch = sol[nb_pl_param*ii + nb_st_param + 0]
         Per = sol[nb_pl_param*ii + nb_st_param + 1]
-        b = sol[nb_pl_param*ii + nb_st_param + 2]
-        Rp_Rs = sol[nb_pl_param*ii + nb_st_param + 3]
+        b = abs(sol[nb_pl_param*ii + nb_st_param + 2])      # as in transitmodel.f: b = sqrt(b*b)
+        Rp_Rs = abs(sol[nb_pl_param*ii + nb_st_param + 3])  # as in transitmodel.f: RpRs = abs(...)
 
+        # ecw = sqrt(e) cos(omega), esw = sqrt(e) sin(omega), where omega is the argument
+        # of periastron as in the RV literature (Winn 2010; batman, RadVel, EXOFAST):
+        # the transit is at true anomaly f = pi/2 - omega. Internally we use
+        # w = pi/2 - omega, the true anomaly at mid-transit.
         ecw = sol[nb_pl_param*ii + nb_st_param + 4]
         esw = sol[nb_pl_param*ii + nb_st_param + 5]
         eccn = ecw*ecw + esw*esw
-
-        # Calculation for omega (w) here
         if eccn >= 1:
-            eccn = 0.99
-        elif eccn == 0:
-            w = 0
+            eccn = 0.99  # as in transitmodel.f; the MCMC prior rejects e >= 1
+
+        if eccn == 0:
+            w = 0.0
         else:
-            # arctan2 gives a result in [-pi, pi], so we add 2pi to the negative values
-            w = np.arctan2(esw, ecw)
+            w = 0.5*np.pi - np.arctan2(esw, ecw)
             if w < 0:
                 w += 2*np.pi
 
@@ -282,11 +284,32 @@ def _transitModel(sol, time, itime, nintg, ntt, tobs, omc):
         eccsw = eccn*np.sin(w)
         y2 = 0 # We define y2 to avoid an error in the prange
 
+        # Out-of-transit points can be skipped (flux = 1) when no phase-curve, Doppler or
+        # occultation term is on. transitmodel.f has the same filter, but there it tests the
+        # Doppler-boosting factor fDB, which is fixed at 1, so the filter never fires.
+        skip_ok = (K == 0) and (ell == 0) and (ag == 0) and (ted == 0)
+        sqrt_e = np.sqrt((1 + eccn)/(1 - eccn))
+
         # Loop over all of the points
         for i in prange(nb_pts):
             time_i = time[i]
             itime_i = itime[i]
             ttcor = ttv_lininterp(tobs, omc, ntt, time_i, ii)
+
+            if skip_ok and dtype[i] == 0:
+                # Sky separation at the middle of the exposure, with a margin larger than the
+                # distance the planet moves in half an exposure (at periastron speed)
+                t = time_i - epoch - ttcor
+                Manom = ((t/Per - np.floor(t/Per)) * 2*np.pi + phi0) % (2*np.pi)
+                Eanom = kep.solve_kepler_eq(eccn, Manom, Manom)
+                Tanom = kep.trueAnomaly(eccn, Eanom)
+                d_Rs = kep.distance(a_Rs, eccn, Tanom)
+                x2 = d_Rs * np.sin(Tanom - w)
+                y2 = d_Rs * np.cos(Tanom - w) * cincl
+                margin = 0.4 + 3.5*np.pi*a_Rs/Per*itime_i*sqrt_e*sqrt_e
+                if np.sqrt(x2*x2 + y2*y2) > 1 + Rp_Rs + margin:
+                    tmodel[i] += 1
+                    continue
 
             tflux = np.empty(nintg)
             vt = np.empty(nintg)
@@ -367,7 +390,7 @@ def _transitModel(sol, time, itime, nintg, ntt, tobs, omc):
                     # Treat the star as the object blocking the light
                     occult = occ.occultUniform(bp, 1/Rp_Rs)
                     
-                    if Rp_Rs < 0:
+                    if Rp_Rs <= 0:
                         ratio = np.zeros(nintg)
                     else:
                         ratio = 1 - occult

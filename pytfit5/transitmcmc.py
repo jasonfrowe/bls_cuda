@@ -291,14 +291,14 @@ def cutOutOfTransit(sol, phot, tdurcut=2):
 # def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc):
 #     return loglikehood(transitm._transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc) + logprior(sol, time)
 def logprob(sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, lbounds, ubounds, dscale=DSCALE_DEFAULT, priors=None):
-    # The loglikehood call stays exactly the same for now
-    # print("sol_a:", sol)
+    # Prior first: a rejected trial does not need the model
+    lp = logprior(sol, lbounds, ubounds, priors=priors)
+    if not np.isfinite(lp):
+        return -np.inf
+
     ll = loglikehood(transitm.transitModel, sol, time, flux, ferror, itime, nintg, ntt, tobs, omc, dscale=dscale)
     if np.isnan(ll):
         ll = -1.0e30
-    
-    # The logprior call now passes the pre-built bounds instead of the 'time' array
-    lp = logprior(sol, lbounds, ubounds, priors=priors)
     # if np.isinf(lp):
     #     lp = 0
 
@@ -337,15 +337,25 @@ def logprior(sol, lbounds, ubounds, priors=None):
 
     npl = (len(sol) - transitm.nb_st_param) // transitm.nb_pl_param
 
-    # Expand bounds for multiple planets
-    for i in range(npl - 1):
-        lbounds = np.append(lbounds, lbounds[transitm.nb_st_param : (transitm.nb_pl_param + transitm.nb_st_param)])
-        ubounds = np.append(ubounds, ubounds[transitm.nb_st_param : (transitm.nb_pl_param + transitm.nb_st_param)])
-
+    # lbounds and ubounds already cover every planet (setup_priors)
     for i in range(len(sol)):
         if lbounds[i] <= sol[i] <= ubounds[i]:
             continue
         else:
+            return badprior
+
+    # Limb darkening must give a positive, monotonically decreasing intensity profile
+    # (as in dmcmc.f). Kipping q1, q2 are held in [0, 1] by the bounds above.
+    c1, c2, c3, c4 = sol[1], sol[2], sol[3], sol[4]
+    if c3 == 0 and c4 == 0:  # quadratic u1, u2
+        if c1 < 0 or c1 + c2 > 1 or c1 + 2*c2 < 0:
+            return badprior
+
+    for i in range(npl):
+        # e = ecw^2 + esw^2 must be below 1 (as in dmcmc.f); the model clips e to 0.99
+        ecw = sol[transitm.nb_st_param + 4 + i * transitm.nb_pl_param]
+        esw = sol[transitm.nb_st_param + 5 + i * transitm.nb_pl_param]
+        if ecw*ecw + esw*esw >= 1.0:
             return badprior
 
     # Joint (b, k) prior:
