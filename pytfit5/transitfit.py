@@ -91,7 +91,8 @@ def createBounds(time, id_to_fit, sol_obj):
     max_t = max(time)
 
     # Rho and Rp/Rs are in log space
-    lower_bound = np.array([np.log(1e-4), 0, -1, 0, 0, 0, -np.inf, -np.inf,      0, -np.inf, 0, -np.inf, -1, -1, -np.inf, -np.inf, -np.inf, -np.inf])
+    # Order: rho, nl1-nl4, dil, vof, zpt | t0, per, bb, rdr, ecw, esw, krv, ted, ell, alb
+    lower_bound = np.array([np.log(1e-4), 0, -1, 0, 0, 0, -np.inf, -np.inf, -np.inf,       0, 0, -np.inf, -1, -1, -np.inf, -np.inf, -np.inf, -np.inf])
     upper_bound = np.array([np.log(1e3),  2,  1, 1, 1, 1,  np.inf,  np.inf, np.inf,  np.inf, 2,       1,  1,  1,  np.inf,  np.inf,  np.inf,  np.inf])
 
     # Expand bounds for multiple planets

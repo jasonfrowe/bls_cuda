@@ -26,9 +26,13 @@ def ttv_lininterp(x, y, ntt, xin, npl):
     ntt: 1D array containing nb of ttv. shape=(nb_planet,)
     """
 
+    yout = 0.0
     if ntt[npl] == 0:
-        yout = 0
-    
+        yout = 0.0
+
+    elif ntt[npl] == 1:
+        yout = y[npl, 0]  # one measurement: constant offset (as in ttcor.f)
+
     elif xin <= x[npl, 0]:
         yout = y[npl,0] + (xin - x[npl,0]) / (x[npl,1] - x[npl,0]) * (y[npl,1] - y[npl,0])
 

@@ -354,7 +354,7 @@ Model parameters. Per-planet parameters are lists with one entry per planet.
 | `per` | `[1.0]` | Period (days) |
 | `bb` | `[0.5]` | Impact parameter |
 | `rdr` | `[0.1]` | Rp/R* |
-| `ecw`, `esw` | `[0.0]` | √e cos ω, √e sin ω |
+| `ecw`, `esw` | `[0.0]` | √e cos ω, √e sin ω, with ω the argument of periastron as in the radial-velocity literature (transit at true anomaly f = π/2 − ω). In pytfit5 before Nov 2026 ω was the true anomaly at mid-transit; convert old values with `keplerian.from_legacy_transitfit5`. |
 | `krv` | `[0.0]` | RV semi-amplitude (m/s) |
 | `ted` | `[0.0]` | Thermal eclipse depth (ppm) |
 | `ell` | `[0.0]` | Ellipsoidal amplitude (ppm) |
@@ -533,7 +533,17 @@ P_min = time span + `margin_factor` × τ is returned instead. Returns
 
 - `rhostar(P, tdur)`: stellar density (g/cm³) from period and duration (days), assuming b = 0, e = 0
   and a/R* ≫ 1: ρ* = 3P / (π² G τ³).
-- `transitDuration(sol, i_planet=0)`: duration (days) of planet `i_planet`.
+- `transitDuration(sol, i_planet=0)`: total duration T14 (days) of planet `i_planet`, including
+  eccentricity (Kipping 2010; same as `transitdur.f` of TransitFit5).
+- `ecc_omega(ecw, esw)`, `ecw_esw(e, omega)`: convert between the fitted parameters and e, ω (radians).
+- `radial_velocity(time, t0, per, K, ecw, esw, gamma=0)`: the star's radial velocity
+  K[cos(f + ω) + e cos ω] + γ (positive away from the observer) for a planet with mid-transit time `t0`.
+- `ecc_params_from_state(r, v, mu, observer=(0, 0, 1))`: `ecw, esw, e, omega` from the planet's position
+  and velocity relative to the star (e.g. from an N-body code), with `mu` = G(M* + Mp) and `observer` the
+  direction from the system to the observer: e sin ω = **e**·ô and e cos ω = **e**·(ô × ĥ), with ô the
+  observer direction projected onto the orbit plane.
+- `from_legacy_transitfit5(ecw_old, esw_old)`: convert parameters from pytfit5 before Nov 2026 or TransitFit5
+  between 14 Aug and Nov 2026, when ω was the true anomaly at mid-transit (the conversion swaps the two).
 - `mark_intransit_data(phot, sol, tdurcut=2.0)`: reset `phot.tflag` and set it to 1 for points within
   about `tdurcut` durations of each transit of every planet in `sol` (the data used by the fits).
 - `solve_kepler_eq(eccn, Manom, Eanom, thres=1e-6, itmax=100)`, `trueAnomaly(eccn, Eanom)`,
