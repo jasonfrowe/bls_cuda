@@ -1,95 +1,76 @@
+"""Complete elliptic integrals for the Mandel & Agol (2002) quadratic model.
+
+All three use Bulirsch's general complete elliptic integral cel(kc, p, a, b), as in
+occultquad.f of TransitFit5 (which replaced Carlson's algorithm in Aug 2026). The
+earlier Python versions used Hastings polynomial approximations for K and E, which
+differ from the exact values by up to ~1e-8 and changed transit depths by ~0.01 ppm.
+"""
 import numpy as np
 from numba import njit
 
-@njit
+_CA = 1e-12  # relative convergence of the AGM iteration (as in occultquad.f)
+
+
+@njit(cache=True)
+def cel(kc, p, a, b):
+    """
+    Bulirsch's general complete elliptic integral,
+    cel(kc, p, a, b) = int_0^{pi/2} (a cos^2 t + b sin^2 t) / ((cos^2 t + p sin^2 t) sqrt(cos^2 t + kc^2 sin^2 t)) dt.
+    Returns 0 for kc = 0, as in occultquad.f.
+    """
+    if kc == 0.0:
+        return 0.0
+
+    kc = abs(kc)
+    e = kc
+    m = 1.0
+
+    if p > 0.0:
+        p = np.sqrt(p)
+        b = b / p
+    else:
+        f = kc * kc
+        g = 1.0 - p
+        e = (f - p) / g
+        h = (b - a * p) / g
+        p = np.sqrt(e / g)
+        a = (a - b) / g
+        b = -h / (p * g) + a * p
+
+    while True:
+        f = a
+        a = a + b / p
+        g = e / p
+        b = b + f * g
+        b = b + b
+        p = g + p
+        g = m
+        m = m + kc
+        if abs(g - kc) <= g * _CA:
+            break
+        kc = 2.0 * np.sqrt(e)
+        e = kc * m
+
+    return 0.5 * np.pi * (a * m + b) / (m * (m + p))
+
+
+@njit(cache=True)
 def ellK(k):
-    """
-    Computes the elliptic integral of the first kind (Hasting's approximation)
-    """
-    m1 = 1 - k*k
-    a0 = 1.38629436112
-    a1 = 0.09666344259
-    a2 = 0.03590092383
-    a3 = 0.03742563713
-    a4 = 0.01451196212
-    b0 = 0.5
-    b1 = 0.12498593597
-    b2 = 0.06880248576
-    b3 = 0.03328355346
-    b4 = 0.00441787012
+    """Complete elliptic integral of the first kind, K(k), for modulus k."""
+    return cel(np.sqrt(max(0.0, 1.0 - k*k)), 1.0, 1.0, 1.0)
 
-    ek1 = a0+m1*(a1+m1*(a2+m1*(a3+m1*a4)))
-    ek2 = (b0+m1*(b1+m1*(b2+m1*(b3+m1*b4)))) * np.log(m1)
 
-    return ek1 - ek2
-
-@njit
+@njit(cache=True)
 def ellE(k):
-    """
-    Computes the elliptic integral of the second kind (Hasting's approximation)
-    """
+    """Complete elliptic integral of the second kind, E(k), for modulus k."""
+    kc = np.sqrt(max(0.0, 1.0 - k*k))
+    return cel(kc, 1.0, 1.0, kc*kc)
 
-    m1 = 1 - k*k
-    a1 = 0.44325141463
-    a2 = 0.06260601220
-    a3 = 0.04757383546
-    a4 = 0.01736506451
-    b1 = 0.24998368310
-    b2 = 0.09200180037
-    b3 = 0.04069697526
-    b4 = 0.00526449639
-    
-    ee1 = 1 + m1*(a1+m1*(a2+m1*(a3+m1*a4)))
-    ee2 = m1*(b1+m1*(b2+m1*(b3+m1*b4))) * np.log(m1)
-    
-    return ee1 - ee2
 
-@njit
+@njit(cache=True)
 def ellPi(n, k):
     """
-    Calculates the elliptic integral of the third kind taken from Bulirsch (1965)
+    Complete elliptic integral of the third kind, Pi(n, k) = int dt / ((1 - n sin^2 t) sqrt(1 - k^2 sin^2 t)).
+    (occultquad.f writes the characteristic with the opposite sign: cel(kc, 1 + n_F, 1, 1), n_F = -n.)
     """
-
-    kc = np.sqrt(1 - k*k)
-    p = np.sqrt(1 - n)
-    m0 = 1
-    c = 1
-    d = 1/p
-    e = kc
-
-    nit = 0
-    diff = 1
-
-    while (nit < 10000 and diff > 1e-3):
-        f = c
-        c = d/p + c
-        g = e/p
-        d = 2 * (f*g + d)
-        p = g + p
-        g = m0
-        m0 = kc + m0
-
-        diff = abs(1 - kc/g)
-        kc = 2*np.sqrt(e)
-        e = kc*m0
-            
-        nit += 1
-
-    return 0.5*np.pi*(c*m0+d)/(m0*(m0+p))
-
-# import matplotlib.pyplot as plt
-# import mpmath as mm
-
-# x = np.linspace(0, 0.9, 100)
-# y = np.zeros(len(x))
-# y_test = np.zeros(len(x))
-# for i, x_ in enumerate(x):
-#     y[i] = mm.ellippi(-999, x_*x_)
-#     y_test[i] = ellPi(-999, x_)
-
-# print(np.max(np.abs(y - y_test)))
-
-# plt.plot(x, y)
-# plt.plot(x, y_test)
-# plt.plot(x, y - y_test)
-# plt.show()
+    return cel(np.sqrt(max(0.0, 1.0 - k*k)), 1.0 - n, 1.0, 1.0)

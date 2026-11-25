@@ -16,6 +16,12 @@ import matplotlib.pyplot as plt  #MatPlotLib for some simple plots
 
 from scipy import stats #For Kernel Density Estimation
 
+# Handle the NumPy 1.x to 2.0 trapezoid rename seamlessly.
+if not hasattr(np, 'trapezoid'):
+    np.trapezoid = np.trapz
+if not hasattr(np, 'trapz'):
+    np.trapz = np.trapezoid
+
 # Nice for keeping an eye on progress.
 from tqdm import trange
 
@@ -570,6 +576,14 @@ class tpy5_inputs_class:
         self.iter_sigma_threshold = 3.0  # Sigma threshold for transit detection
         self.iter_min_duration    = 0.05 # Minimum transit duration in days (~1 hour)
         self.iter_verbose        = False  # Print iteration progress and statistics
+        self.iter_mask_mode      = "points" # How dips are found for masking: "points" = runs of single points
+                                          #   below -iter_sigma_threshold*std, at least iter_min_duration long;
+                                          #   "binned" = residuals averaged over iter_bin_hours below
+                                          #   -iter_sigma_threshold*MAD noise (finds shallower/shorter dips)
+        self.iter_bin_hours      = 1.0    # Averaging window for iter_mask_mode = "binned" [hours]
+        self.cut_direction       = "both" # cutoutliers: "both" = cut high and low outliers;
+                                          #   "up" = cut only high outliers (flares, cosmic rays), keeping
+                                          #   1-2 cadence transits
         # BLS parameters (consolidated from gbls_inputs_class)
         self.filename = "filename.txt"  # Lightcurve filename
         self.lcdir    = ""              # Lightcurve directory
@@ -579,8 +593,15 @@ class tpy5_inputs_class:
         self.ofac     = 8.0             # Oversampling factor
         self.nper     = 50000           # Number of periods (deprecated, auto-calculated)
         self.minbin   = 5               # Minimum number of bins in transit
+        self.nbins    = 2000            # Number of phase bins in BLS (capped at npt-1)
+        self.max_bin_minutes = 0.0      # If > 0: widest allowed phase bin [minutes]; at long periods
+                                        # nb grows to max(nbins, P/max_bin_minutes). 0 = fixed nbins
         self.plots    = 1               # 0 = no plots, 1 = X11, 2 = PNG+X11, 3 = PNG
         self.multipro = 1               # 0 = single thread, 1 = multiprocessing
+        self.bls_engine = "auto"        # BLS kernel: "auto" (compiled C if built, else Numba), "c", "numba"
+        self.dips_only = False          # BLS: True = only transit-like boxes (flux below median); False = classic s^2 (dips and brightenings)
+        self.bls_isa  = "auto"          # C kernel SIMD variant: auto, avx512, avx2, scalar,
+                                        #   avx512_nodiv, avx512_div, avx2_div, avx2_nodiv
         self.normalize = "iterative_baseline"  # BLS normalization: none, mad, percentile_mad, coverage_mad, iterative_baseline
         self.return_spectrum = False    # If True, return full BLS spectrum (periods, power, freqs)
         self.oneoverf_correction = True # If True, apply baseline subtraction (else leave raw)
@@ -1076,12 +1097,29 @@ def run_sigclip_global(phot, tpy5_inputs):
 
 def run_cutoutliers(phot, tpy5_inputs):
 
-    phot.icut = np.maximum(cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip), phot.icut)
+    direction = getattr(tpy5_inputs, "cut_direction", "both")
+    phot.icut = np.maximum(cutoutliers(phot.time, phot.flux, tpy5_inputs.nsampmax, tpy5_inputs.dsigclip,
+                                       direction=direction), phot.icut)
     tpy5_inputs.dataclip = 1 
     
-def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
+def cutoutliers(x, y, nsampmax = 3, sigma = 3.0, direction = "both"):
     """
-    Uses derivatives to cut outliers
+    Uses derivatives to cut outliers (compiled; see pytfit5/detrend.py).
+    direction = "both": cut points far above or below both neighbours.
+    direction = "up":   cut only points far above both neighbours.
+
+    Point i is cut if it differs from both neighbours by more than sigma times the
+    median absolute point-to-point difference within +/- nsampmax points.
+    """
+    from pytfit5 import detrend
+    return detrend.cutoutliers(x, y, nsampmax, sigma, direction)
+
+
+def cutoutliers_reference(x, y, nsampmax = 3, sigma = 3.0, direction = "both"):
+    """
+    Original pure-Python cutoutliers (reference for tests). Near both ends of the light
+    curve (first and last nsampmax points) its scatter estimate included stale samples;
+    the compiled version uses only the samples in range.
     """
 
     threshold = 0.0005 #Fixed threshold, if sigma <= 0
@@ -1109,7 +1147,10 @@ def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
         vp = y[i] - y[i+1]
         vm = y[i] - y[i-1]
 
-        if  (np.abs(vp) > threshold) and (np.abs(vm) > threshold) and (vp/vm > 0):
+        if direction == "up":
+            if (vp > threshold) and (vm > threshold):
+                icut[i] = 1 #cut
+        elif  (np.abs(vp) > threshold) and (np.abs(vm) > threshold) and (vp/vm > 0):
             icut[i] = 1 #cut
 
     return icut
@@ -1117,7 +1158,8 @@ def cutoutliers(x, y, nsampmax = 3, sigma = 3.0):
 def run_polyfilter(phot_SC, tpy5_inputs):
 
     phot_SC.flux_f = polyfilter(phot_SC.time, phot_SC.flux, phot_SC.ferr, phot_SC.tflag, \
-                                tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                                tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
 
     tpy5_inputs.detrended = 1 # Mark that we have detrended data
 
@@ -1146,6 +1188,10 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     None (modifies phot.flux_f and phot.tflag in place)
     """
     
+    if getattr(tpy5_inputs, "iter_mask_mode", "points") == "binned":
+        _polyfilter_iterative_binned(phot, tpy5_inputs)
+        return
+
     # Get parameters from tpy5_inputs class
     max_iters = tpy5_inputs.iter_max_iters
     sigma_threshold = tpy5_inputs.iter_sigma_threshold
@@ -1168,7 +1214,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     for iteration in range(max_iters):
         # Run detrending with current mask
         phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag, 
-                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
         
         # Calculate residuals
         residuals = phot.flux_f - np.median(phot.flux_f)
@@ -1250,7 +1297,8 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
     
     # Final detrending pass with complete mask
     phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag, 
-                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize)
+                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                multipro=getattr(tpy5_inputs, "multipro", 1))
     
     tpy5_inputs.detrended = 1
     
@@ -1260,8 +1308,104 @@ def run_polyfilter_iterative(phot, tpy5_inputs):
         print(f"  Newly detected transit points: {np.sum(phot.tflag) - np.sum(tflag_original)}")
 
 
+def _polyfilter_iterative_binned(phot, tpy5_inputs):
+    """
+    Iterative detrending for iter_mask_mode = "binned".
+
+    Each iteration: detrend with the current mask, average the residuals over
+    iter_bin_hours, and mask points where the average is below
+    -iter_sigma_threshold times its robust (MAD) noise, plus one averaging
+    window on each side. Stops when nothing new is masked or after
+    iter_max_iters. Averaging finds transits too shallow per point and
+    shorter than iter_min_duration, which the "points" mode misses.
+
+    The noise is measured once, on the first pass, from all points, and the
+    running mean uses unmasked points only. Before, the noise was re-measured
+    on each pass from the unmasked points, so it shrank as dips were removed,
+    and the running mean beside a masked transit included in-transit points;
+    both made every pass mask more (20% of Kepler-8's points after five
+    passes, against ~6% for its transits and padding).
+    """
+    max_iters = tpy5_inputs.iter_max_iters
+    nsig = tpy5_inputs.iter_sigma_threshold
+    win_h = getattr(tpy5_inputs, "iter_bin_hours", 1.0)
+    multipro = getattr(tpy5_inputs, "multipro", 1)
+
+    if not hasattr(phot, 'tflag') or phot.tflag is None or len(phot.tflag) == 0:
+        phot.tflag = np.zeros(len(phot.time))
+
+    ts = np.argsort(phot.time)                     # work in time order
+    cad = np.median(np.diff(phot.time[ts]))
+    n = max(2, int(round(win_h / 24.0 / cad)))     # points per averaging window
+    kern = np.ones(n) / n
+    dil = np.ones(2 * n + 1)
+
+    sig = None
+    for iteration in range(max_iters):
+        phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag,
+                                 tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                                 multipro=multipro)
+        r = (phot.flux_f - np.median(phot.flux_f))[ts]
+        unm = phot.tflag[ts] == 0
+        if np.sum(unm) < 10:
+            break
+        # running mean of the unmasked points only: averaging in a masked
+        # transit pulled the points beside it down, so each pass flagged
+        # them too and every mask grew by about a window per pass
+        w = unm.astype(float)
+        sm = np.convolve(r * w, kern, mode='same') / np.maximum(np.convolve(w, kern, mode='same'), 1e-12)
+        med = np.median(sm[unm])
+        if sig is None:   # the noise from the first pass only (see docstring)
+            sig = 1.4826 * np.median(np.abs(sm - np.median(sm)))
+            if not sig > 0:
+                break
+        flag = (sm - med) < -nsig * sig
+        new = (np.convolve(flag.astype(float), dil, mode='same') > 0) & unm
+        if np.sum(new) == 0:
+            break
+        newmask = np.zeros(len(phot.time), dtype=bool)
+        newmask[ts] = new
+        phot.tflag = (phot.tflag.astype(bool) | newmask).astype(int)
+
+    phot.flux_f = polyfilter(phot.time, phot.flux, phot.ferr, phot.tflag,
+                             tpy5_inputs.boxbin, tpy5_inputs.nfitp, tpy5_inputs.gapsize,
+                             multipro=multipro)
+    tpy5_inputs.detrended = 1
+
+
 def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
     """
+    Detrend with a moving polynomial (Kepler TRANSITFIT5 routines), compiled with Numba.
+
+    At each point, a polynomial of order nfitp is fitted to the unmasked (tflag == 0)
+    points within +/- boxbin/2, not crossing gaps longer than gapsize, with iterative
+    4-sigma clipping (weights 1/ferr^2), and evaluated at that point. Masked points get a
+    trend interpolated from both sides (see polyrange). Same results as
+    polyfilter_reference (the original pure-Python version), about two orders of magnitude
+    faster; see pytfit5/detrend.py.
+
+    Parameters:
+    time (np.array) : times series, usually in days (need not be sorted)
+    flux (np.array) : relative flux
+    ferr (np.array) : uncertainty on relative flux
+    tflag (np.array): 1 = masked (e.g. in transit), excluded from the fits
+    boxbin (float)  : full width of detrending window.  Units should match time.
+    nfitp  (int)    : order of polynomial fit
+    gapsize (float) : identifying boundaries to not detrend across.  Units should match time.
+    multipro (int)  : 0 = one thread; 1 = Numba threads (NUMBA_NUM_THREADS)
+
+    Returns:
+    flux_f (np.array) : detrended time-series (flux - trend + median(flux))
+    """
+    from pytfit5 import detrend
+    offset = detrend.polyfilter_trend(time, flux, ferr, tflag, boxbin, nfitp, gapsize,
+                                      multipro=multipro)
+    return np.asarray(flux) - offset + np.median(flux)
+
+
+def polyfilter_reference(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
+    """
+    Original pure-Python polyfilter (reference for tests; slow).
     Computes detended data based on Kepler TRANSITFIT5 routines
 
     Parameters:
@@ -1302,8 +1446,8 @@ def polyfilter(time, flux, ferr, tflag, boxbin, nfitp, gapsize, multipro = 1):
 
     else:
     
-        max_processes = os.cpu_count()
-        ndiv = npt // (max_processes - 1) + 1
+        max_processes = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()  # CPUs this process may use (respects Slurm), not the whole node
+        ndiv = npt // max_processes + 1
         offset = np.zeros((max_processes, ndiv))
     
         iarg = np.zeros((max_processes, ndiv), dtype = int)
@@ -1340,41 +1484,69 @@ def compute_polyrange(iarg, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2, nd
 
     return offset
 
-def polyrange(i, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2):
-    """
-    Computes mask for time series
-    """
-
-    tzero = time[i]
-    t1 = tzero - bbd2
-    t2 = tzero + bbd2
-
-    #Check if there is a gap in our time-span
+def _window(tzero, half, ngap, gaps):
+    """[t1, t2] of half-width ``half`` around tzero, clipped at data gaps."""
+    t1 = tzero - half
+    t2 = tzero + half
     for j in range(ngap):
         if (gaps[j] > t1) and (gaps[j] < tzero):
             t1 = gaps[j]
         if (gaps[j] < t2) and (gaps[j] > tzero):
             t2 = gaps[j]
+    return t1, t2
 
-    #Get data inside time-span that is not a transit.
-    tmask = (time > t1) & (time < t2) & (tflag == 0)
 
-    x = time[tmask]
+def polyrange(i, time, flux, ferr, tflag, nfitp, ngap, gaps, bbd2):
+    """
+    Trend at time[i]: a polynomial of order nfitp fitted to the unmasked
+    (tflag == 0) points within +/- bbd2 (not crossing data gaps), evaluated
+    at time[i].
+
+    For an unmasked point this is unchanged: the fit needs more than nfitp + 1
+    points, else their mean. For a masked point (the trend under a transit)
+    the fit needs at least 2 * (nfitp + 1) unmasked points on both sides of
+    it, so the trend is interpolated rather than extrapolated. If the window
+    does not have them it is widened (x2, then x4). If it still does not:
+    - points on both sides, but few: a straight line;
+    - points on one side only: the median of the nearest ones;
+    - no unmasked points at all: the median of every point in the window.
+    (Before, an empty window gave a trend of 0, so the detrended flux came out
+    as flux + median, and a cubic through a handful of points on one side
+    extrapolated to values like 0.4 or 8.)
+    """
+
+    tzero = time[i]
+    t1, t2 = _window(tzero, bbd2, ngap, gaps)
+    inwin1 = (time > t1) & (time < t2)
+    tmask = inwin1 & (tflag == 0)
+
+    if tflag[i] == 0:
+        # an unmasked point has unmasked neighbours: the original rule
+        npt2 = np.sum(tmask)
+        if npt2 > nfitp + 1:
+            return polydetrend(time[tmask], flux[tmask], ferr[tmask], nfitp, tzero)
+        return np.mean(flux[tmask]) if npt2 > 0 else flux[i]
+
+    # a masked point: the trend under it must come from points on both sides
+    min_pts = 2 * (nfitp + 1)
+    for scale in (1, 2, 4):
+        if scale > 1:
+            t1, t2 = _window(tzero, bbd2 * scale, ngap, gaps)
+            tmask = (time > t1) & (time < t2) & (tflag == 0)
+        x = time[tmask]
+        npt2 = x.shape[0]
+        both_sides = np.any(x < tzero) and np.any(x > tzero)
+        if npt2 >= min_pts and both_sides:
+            return polydetrend(x, flux[tmask], ferr[tmask], nfitp, tzero)
+
+    # fallbacks, on the widest window
     y = flux[tmask]
-    z = ferr[tmask]
-
-    npt2 = x.shape[0]
-    # print(t1, t2, npt2, tzero)
-
-    if npt2 > nfitp + 1:
-        offset1 = polydetrend(x, y, z, nfitp, tzero)
-    elif npt2 == 0:
-        offset1 = 0.0
-    else:
-        offset1 = np.mean(y)
-    
-    
-    return offset1
+    if npt2 == 0:
+        return np.median(flux[inwin1]) if np.any(inwin1) else flux[i]
+    if both_sides and npt2 >= 3:
+        return polydetrend(x, y, ferr[tmask], min(nfitp, 1), tzero)   # a line across the masked stretch
+    nearest = np.argsort(np.abs(x - tzero))[:min_pts]
+    return np.median(y[nearest])
 
 def polydetrend(x, y, z, nfitp, x_c):
 
@@ -1558,24 +1730,31 @@ def checkperT0(samples,burninfrac,nthin,sol,serr):
         burnin=0
     
     
-    if iT0>-1:
-        mode,x_eval,kde1=modekdestimate(chain[:,iT0],burnin)
+    def _interval(i):
+        # A chain that never moved (e.g. started outside the priors) has no spread; the KDE would raise
+        # LinAlgError.  Report an infinite interval so demcmcRoutine treats it as a run-away.
+        col = chain[burnin:, i]
+        if len(col) < 2 or not np.all(np.isfinite(col)) or np.ptp(col) == 0:
+            return np.inf, np.inf
+        try:
+            mode,x_eval,kde1=modekdestimate(chain[:,i],burnin)
+        except np.linalg.LinAlgError:
+            return np.inf, np.inf
         perc1 = intperc(mode,x_eval,kde1)
-        t0_ep=np.abs(perc1[1]-mode)
-        t0_em=np.abs(mode-perc1[0])
+        return np.abs(perc1[1]-mode), np.abs(mode-perc1[0])
+
+    if iT0>-1:
+        t0_ep,t0_em=_interval(iT0)
     else:
         t0_ep=0.0
         t0_em=0.0
-    
+
     if iPer>-1:
-        mode,x_eval,kde1=modekdestimate(chain[:,iPer],burnin)
-        perc1 = intperc(mode,x_eval,kde1)
-        per_ep=np.abs(perc1[1]-mode)
-        per_em=np.abs(mode-perc1[0])
+        per_ep,per_em=_interval(iPer)
     else:
         per_ep=0.0
         per_em=0.0
-        
+
     return t0_ep,t0_em,per_ep,per_em
 
 def modekdestimate(chain,burnin):
@@ -1632,7 +1811,7 @@ def intperc(x,x_eval,kde1,perc=0.6827):
                 i1=i1+1
             #print('case2')
 
-        intval=np.trapz(kdea[j1:j2],x_eval[j1:j2])
+        intval=np.trapezoid(kdea[j1:j2],x_eval[j1:j2])
         #print(j1,j2,intval,kdea[j1test],kdea[j2test])
 
         #make sure we can break from loop
@@ -1712,6 +1891,11 @@ def save_mcmc_results(filename, phot, sol, chain, accept, burnin, params_to_fit,
             sol_group.create_dataset('err_array', data=err_array)
         except AttributeError:
             pass
+
+        if hasattr(sol, 'dscale'):
+            sol_group.attrs['dscale'] = sol.dscale
+        if hasattr(sol, 'ddscale'):
+            sol_group.attrs['ddscale'] = sol.ddscale
         
         # Save MCMC results
         mcmc_group = f.create_group('mcmc_results')
@@ -1804,6 +1988,10 @@ def load_mcmc_results(filename):
         if 'err_array' in f['solution']:
             err_array = f['solution/err_array'][:]
             sol.load_errors(err_array)
+        if 'dscale' in f['solution'].attrs:
+            sol.dscale = f['solution'].attrs['dscale']
+        if 'ddscale' in f['solution'].attrs:
+            sol.ddscale = f['solution'].attrs['ddscale']
         
         # Load MCMC results
         chain = f['mcmc_results/chain'][:]

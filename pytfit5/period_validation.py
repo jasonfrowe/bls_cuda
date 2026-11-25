@@ -40,7 +40,7 @@ def get_stellar_density(mass_solar, radius_solar):
     
     return density / 1000.0
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def compute_transit_snr(time, flux, t0, period, tdur, n_dur=1.5):
     """
     Compute SNR for a given period and epoch by identifying in-transit points.
@@ -58,29 +58,34 @@ def compute_transit_snr(time, flux, t0, period, tdur, n_dur=1.5):
     tdur : float
         Transit duration (days)
     n_dur : float
-        Number of transit durations to include (default 1.5 for safety)
+        Width, in transit durations, of the window excluded from the out-of-transit
+        statistics (default 1.5, a margin for duration and epoch errors)
         
     Returns
     -------
     snr : float
-        Signal-to-noise ratio of the transit
+        depth / sigma * sqrt(number of in-transit points)
     depth : float
-        Transit depth (out-of-transit median - in-transit median)
+        Median out-of-transit flux minus mean in-transit flux
     n_transits : int
-        Number of transits detected
+        Number of transits with in-transit data
     in_transit_mask : np.ndarray
-        Boolean mask of in-transit points
+        Boolean mask of in-transit points (within tdur/2 of mid-transit)
+
+    Notes
+    -----
+    In-transit points are those within tdur/2 of mid-transit; out-of-transit points
+    are those further than n_dur * tdur / 2. sigma is 1.4826 * MAD of the
+    out-of-transit flux, robust to variability and to other transits. The depth is
+    the mean, not the median, of the in-transit flux, so that a fold in which only
+    some transit windows contain a transit scores lower (the median is undefined when
+    half the windows are empty).
     """
-    npt = len(time)
-    half_dur = n_dur * tdur / 2.0
+    dt = ((time - t0) / period + 0.5) % 1.0 - 0.5
+    dt = np.abs(dt * period)
     
-    # Phase fold the data
-    phase = ((time - t0) / period) % 1.0
-    phase[phase > 0.5] -= 1.0  # Center on 0
-    
-    # Identify in-transit points
-    in_transit_mask = np.abs(phase * period) < half_dur
-    out_transit_mask = ~in_transit_mask
+    in_transit_mask = dt < 0.5 * tdur
+    out_transit_mask = dt >= 0.5 * max(n_dur, 1.0) * tdur
     
     n_in = np.sum(in_transit_mask)
     n_out = np.sum(out_transit_mask)
@@ -88,12 +93,12 @@ def compute_transit_snr(time, flux, t0, period, tdur, n_dur=1.5):
     if n_in < 3 or n_out < 3:
         return 0.0, 0.0, 0, in_transit_mask
     
-    # Compute statistics
-    flux_in = flux[in_transit_mask]
     flux_out = flux[out_transit_mask]
-    
-    depth = np.median(flux_out) - np.median(flux_in)
-    noise = np.std(flux_out)
+    fmed = np.median(flux_out)
+    depth = fmed - np.mean(flux[in_transit_mask])
+    noise = 1.4826 * np.median(np.abs(flux_out - fmed))
+    if noise <= 0:
+        noise = np.std(flux_out)
     
     if noise <= 0:
         return 0.0, depth, 0, in_transit_mask
@@ -124,7 +129,7 @@ def analyze_individual_transits(time, flux, t0, period, tdur, n_dur=1.5):
     tdur : float
         Transit duration (days)
     n_dur : float
-        Number of transit durations to include
+        Width, in durations, of the window excluded from the noise estimate
         
     Returns
     -------
@@ -135,76 +140,65 @@ def analyze_individual_transits(time, flux, t0, period, tdur, n_dur=1.5):
         - transit_snrs: Array of individual transit SNRs
         - transit_depths: Array of individual transit depths
         - strongest_snr: SNR of strongest transit
+        - rest_snr: SNR of all other transits folded together
         - mean_snr: Mean SNR of all transits
         - median_snr: Median SNR of all transits
         - std_snr: Standard deviation of SNRs
-        - is_single_dominant: Boolean indicating if one transit dominates
+        - is_single_dominant: True if the strongest transit is significant and the
+          others folded together are weak (rest_snr < strongest_snr / 3). For a
+          real periodic signal with n transits of SNR s each, rest_snr is about
+          s * sqrt(n - 1) >= strongest_snr.
+        - n_transits: Number of transits with data
     """
-    # Get overall in-transit mask
-    _, _, _, in_transit_mask = compute_transit_snr(time, flux, t0, period, tdur, n_dur)
-    
-    # Phase fold and identify transit numbers
-    phase = ((time - t0) % period) / period
-    phase[phase > 0.5] -= 1.0
+    dt = ((time - t0) / period + 0.5) % 1.0 - 0.5
+    dt = np.abs(dt * period)
+    in_transit = dt < 0.5 * tdur
+    out_transit = dt >= 0.5 * max(n_dur, 1.0) * tdur
     transit_number = np.round((time - t0) / period).astype(int)
     
-    # Get unique transits
-    unique_transits = np.unique(transit_number)
+    flux_out = flux[out_transit] if np.any(out_transit) else flux
+    fmed = np.median(flux_out)
+    noise = 1.4826 * np.median(np.abs(flux_out - fmed))
+    if noise <= 0:
+        noise = np.std(flux_out)
     
     transit_numbers = []
     transit_times = []
     transit_snrs = []
     transit_depths = []
     
-    # Calculate noise from out-of-transit data
-    out_transit_flux = flux[~in_transit_mask]
-    if len(out_transit_flux) > 0:
-        noise = np.std(out_transit_flux)
-    else:
-        noise = np.std(flux)
+    for tr_num in np.unique(transit_number[in_transit]):
+        mask = in_transit & (transit_number == tr_num)
+        n = np.sum(mask)
+        if n == 0:
+            continue
+        depth = fmed - np.mean(flux[mask])
+        transit_numbers.append(tr_num)
+        transit_times.append(t0 + tr_num * period)
+        transit_snrs.append(depth * np.sqrt(n) / noise if noise > 0 else 0.0)
+        transit_depths.append(depth)
     
-    # Analyze each transit individually
-    for tr_num in unique_transits:
-        # Mask for this specific transit
-        mask = (transit_number == tr_num) & (np.abs(phase) < tdur/(2*period))
-        
-        if np.sum(mask) > 0:
-            transit_time = t0 + tr_num * period
-            in_transit_flux = flux[mask]
-            
-            if len(in_transit_flux) > 0:
-                depth = 1.0 - np.median(in_transit_flux)
-                snr_single = depth * np.sqrt(len(in_transit_flux)) / noise if noise > 0 else 0
-                
-                transit_numbers.append(tr_num)
-                transit_times.append(transit_time)
-                transit_snrs.append(snr_single)
-                transit_depths.append(depth)
-    
-    # Convert to arrays
     transit_numbers = np.array(transit_numbers)
     transit_times = np.array(transit_times)
     transit_snrs = np.array(transit_snrs)
     transit_depths = np.array(transit_depths)
     
-    # Calculate statistics
     if len(transit_snrs) > 0:
-        strongest_snr = np.max(transit_snrs)
+        k = int(np.argmax(transit_snrs))
+        strongest_snr = transit_snrs[k]
         mean_snr = np.mean(transit_snrs)
         median_snr = np.median(transit_snrs)
         std_snr = np.std(transit_snrs)
-        
-        # Check if one transit dominates (strongest is >2.5× the median of others)
-        other_snrs = transit_snrs[transit_snrs != strongest_snr]
-        if len(other_snrs) > 0:
-            is_single_dominant = strongest_snr > 2.5 * np.median(other_snrs)
+        if len(transit_snrs) > 1:
+            rest = in_transit & (transit_number != transit_numbers[k])
+            n_rest = np.sum(rest)
+            rest_snr = (fmed - np.mean(flux[rest])) * np.sqrt(n_rest) / noise if noise > 0 else 0.0
+            is_single_dominant = bool(strongest_snr > 0 and rest_snr < strongest_snr / 3.0)
         else:
+            rest_snr = 0.0
             is_single_dominant = True  # Only one transit
     else:
-        strongest_snr = 0.0
-        mean_snr = 0.0
-        median_snr = 0.0
-        std_snr = 0.0
+        strongest_snr = rest_snr = mean_snr = median_snr = std_snr = 0.0
         is_single_dominant = False
     
     return {
@@ -213,6 +207,7 @@ def analyze_individual_transits(time, flux, t0, period, tdur, n_dur=1.5):
         'transit_snrs': transit_snrs,
         'transit_depths': transit_depths,
         'strongest_snr': strongest_snr,
+        'rest_snr': rest_snr,
         'mean_snr': mean_snr,
         'median_snr': median_snr,
         'std_snr': std_snr,
@@ -238,7 +233,9 @@ def optimize_epoch(time, flux, period, tdur, t0_initial, search_window=None):
     t0_initial : float
         Initial guess for epoch (days)
     search_window : float, optional
-        Window around t0_initial to search (days). Default is period/2
+        Full width of the window around t0_initial to search (days). Default is
+        period/2. The grid step is tdur/10 (or search_window/20 if smaller), and
+        t0_initial itself is always tested.
         
     Returns
     -------
@@ -254,11 +251,11 @@ def optimize_epoch(time, flux, period, tdur, t0_initial, search_window=None):
     if search_window is None:
         search_window = period / 2.0
     
-    # Search over a grid of epochs
-    n_steps = max(20, int(search_window / tdur))
-    t0_grid = np.linspace(t0_initial - search_window/2, 
-                          t0_initial + search_window/2, 
-                          n_steps)
+    # Grid with steps of at most tdur/10, centred on (and including) t0_initial
+    half = search_window / 2.0
+    step = min(tdur / 10.0, half / 10.0) if tdur > 0 else half / 10.0
+    n_half = max(1, int(np.ceil(half / step)))
+    t0_grid = t0_initial + step * np.arange(-n_half, n_half + 1)
     
     snr_best = -np.inf
     t0_best = t0_initial
@@ -374,7 +371,7 @@ def estimate_single_transit_period(time, tdur, rho_star=1.41, margin_factor=1.5)
 
 def test_period_aliases(time, flux, t0_bls, period_bls, tdur_bls, 
                         test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
-                        optimize_t0=True):
+                        optimize_t0=True, min_snr_ratio=1.10):
     """
     Test if the BLS period is an alias by checking multiples and fractions.
     
@@ -398,6 +395,13 @@ def test_period_aliases(time, flux, t0_bls, period_bls, tdur_bls,
         Period factors to test. Default tests P/2, P, 2P, 3P, 4P, 5P
     optimize_t0 : bool
         Whether to optimize epoch for each period (default True)
+    min_snr_ratio : float
+        Another factor replaces the BLS period only if its SNR exceeds the SNR at
+        factor 1 by this ratio (default 1.10). A true P/2 or 2P alias gains about
+        sqrt(2); smaller gains are within the noise, e.g. when one transit is
+        weakened by variability or partly in a gap. On simulated 60-day light curves
+        with SNR 6-10, 1.10 changed 1.7% of correct periods and missed 3.3% of P/2
+        and 2P aliases.
         
     Returns
     -------
@@ -428,25 +432,29 @@ def test_period_aliases(time, flux, t0_bls, period_bls, tdur_bls,
     for factor in test_factors:
         period_test = period_bls * factor
         
-        # Initial epoch guess: adjust for period change
+        # Candidate epochs. For a longer period (factor k >= 1) the transits seen at the
+        # BLS period split into k interleaved sets, starting at t0 + j * P_bls for
+        # j = 0 .. k-1; test them all. For a shorter period the BLS transits are a
+        # subset of the new ones, so t0 itself is a valid epoch.
         if factor >= 1.0:
-            # For longer periods, keep the same initial transit
-            t0_initial = t0_bls
+            n_cand = max(1, int(round(factor)))
+            t0_cands = [t0_bls + j * period_bls for j in range(n_cand)]
         else:
-            # For shorter periods, find the first transit within the BLS epoch window
-            t0_initial = t0_bls % period_test
+            t0_cands = [t0_bls]
         
-        if optimize_t0:
-            # Optimize epoch for this period
-            t0_opt, snr, depth, n_transits = optimize_epoch(
-                time, flux, period_test, tdur_bls, t0_initial
-            )
-        else:
-            # Just evaluate at initial epoch
-            snr, depth, n_transits, _ = compute_transit_snr(
-                time, flux, t0_initial, period_test, tdur_bls
-            )
-            t0_opt = t0_initial
+        best = None
+        for t0_initial in t0_cands:
+            if optimize_t0:
+                # Refine within +-1 duration of the predicted epoch
+                cand = optimize_epoch(time, flux, period_test, tdur_bls, t0_initial,
+                                      search_window=2.0 * tdur_bls)
+            else:
+                snr_c, depth_c, ntr_c, _ = compute_transit_snr(
+                    time, flux, t0_initial, period_test, tdur_bls)
+                cand = (t0_initial, snr_c, depth_c, ntr_c)
+            if best is None or cand[1] > best[1]:
+                best = cand
+        t0_opt, snr, depth, n_transits = best
         
         results['t0s'].append(t0_opt)
         results['snrs'].append(snr)
@@ -459,8 +467,13 @@ def test_period_aliases(time, flux, t0_bls, period_bls, tdur_bls,
     results['depths'] = np.array(results['depths'])
     results['n_transits'] = np.array(results['n_transits'])
     
-    # Find best result
-    best_idx = np.argmax(results['snrs'])
+    # Find best result; keep the BLS period unless another factor is clearly better
+    best_idx = int(np.argmax(results['snrs']))
+    is_one = np.isclose(results['factors'], 1.0, rtol=0.01)
+    if np.any(is_one):
+        one_idx = int(np.flatnonzero(is_one)[0])
+        if results['snrs'][best_idx] <= min_snr_ratio * max(results['snrs'][one_idx], 0.0):
+            best_idx = one_idx
     results['best_factor'] = results['factors'][best_idx]
     results['best_period'] = results['periods'][best_idx]
     results['best_t0'] = results['t0s'][best_idx]
@@ -568,7 +581,8 @@ def print_period_validation_report(results, verbose=True, transit_info=None):
 
 def validate_bls_period(time, flux, bls_result, 
                        test_factors=[0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
-                       optimize_t0=True, verbose=True, analyze_transits=True):
+                       optimize_t0=True, verbose=True, analyze_transits=True,
+                       min_snr_ratio=1.10):
     """
     Convenience function to validate a BLS result.
     
@@ -588,6 +602,8 @@ def validate_bls_period(time, flux, bls_result,
         Whether to print detailed report
     analyze_transits : bool
         Whether to analyze individual transit SNRs
+    min_snr_ratio : float
+        SNR gain needed to replace the BLS period (see test_period_aliases)
         
     Returns
     -------
@@ -602,7 +618,8 @@ def validate_bls_period(time, flux, bls_result,
         bls_result.bper, 
         bls_result.tdur,
         test_factors=test_factors,
-        optimize_t0=optimize_t0
+        optimize_t0=optimize_t0,
+        min_snr_ratio=min_snr_ratio
     )
     
     # Analyze individual transits for the best period

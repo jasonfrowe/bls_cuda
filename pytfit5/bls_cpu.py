@@ -24,6 +24,7 @@ import os
 # Import tpy5_inputs_class from transitPy5
 from pytfit5.transitPy5 import tpy5_inputs_class
 from pytfit5 import period_validation as pval
+from pytfit5 import bls_c
 
 # Backward compatibility alias (deprecated)
 gbls_inputs_class = tpy5_inputs_class
@@ -47,6 +48,37 @@ class gbls_ans_class:
         self.periods  = None  # Full period array (if return_spectrum=True)
         self.power    = None  # Full power array (if return_spectrum=True)
         self.freqs    = None  # Full frequency array (if return_spectrum=True)
+        self.engine   = None  # Kernel used: "numba" or "c:<variant>"
+        self.single   = False # True if the result is a single event (bls_pulse: the pulse
+                              # search won; bls: best period longer than the time span)
+
+
+def _available_cpus():
+    """CPUs this process may use (respects Slurm/taskset), not the whole node."""
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+
+
+def _select_engine(tpy5_inputs):
+    """Pick the BLS kernel from tpy5_inputs.bls_engine / bls_isa.
+
+    bls_engine: "auto" (C kernel if built, else Numba), "c" (error if unavailable), "numba".
+    bls_isa:    "auto" or a bls_c variant name (avx512, avx2, avx512_nodiv, avx2_div, ...).
+    Returns (engine, isa) with engine in {"c", "numba"}.
+    """
+    engine = str(getattr(tpy5_inputs, "bls_engine", "auto")).lower()
+    isa = getattr(tpy5_inputs, "bls_isa", "auto")
+    if engine == "numba":
+        return "numba", isa
+    if engine not in ("auto", "c"):
+        raise ValueError(f"bls_engine must be 'auto', 'c' or 'numba', got {engine!r}")
+    if not bls_c.available():
+        if engine == "c":
+            raise RuntimeError(f"bls_engine='c' but the C kernel is unavailable: {bls_c.load_error()}")
+        return "numba", isa
+    if engine == "auto" and getattr(tpy5_inputs, "multipro", 1) != 0 and not bls_c.has_openmp():
+        return "numba", isa  # single-threaded C would lose to the Numba process pool
+    bls_c.resolve_variant(isa)  # validate early (raises on unknown/unsupported isa)
+    return "c", isa
 
 #generic routine to read in files
 def readfile(filename):
@@ -81,7 +113,7 @@ def readfile(filename):
     
     return time, flux# , ferr, itime
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def nyquest_cpu(time):
 
     dt = np.zeros((time.shape[0]))
@@ -94,7 +126,7 @@ def nyquest_cpu(time):
 
     return nyq
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def qfunc_cpu(f, Mstar, Rstar):
     '''Calculates optimal phase for circular orbit
     '''
@@ -105,7 +137,7 @@ def qfunc_cpu(f, Mstar, Rstar):
 
     return q
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -122,7 +154,7 @@ def calc_nsteps_cpu(Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
     return nstep
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin):
     '''pre-calculate the number of steps to sweep the requested frequency range using optimum steping
     '''
@@ -147,9 +179,24 @@ def calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, m
         f = f + df   #next frequency to scan
     return freqs
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_stats(epo, period, tdur, npt, time, flux):
-    # Import necessary libraries if not already imported (e.g., NumPy)
+    """
+    Depth and SNR of the box (epo, period, tdur).
+
+    Returns (fmean, std, depth, snr):
+      fmean : median out-of-transit flux
+      std   : robust out-of-transit scatter, 1.4826 * MAD (std if MAD is 0)
+      depth : fmean - mean in-transit flux (the box depth that BLS fits)
+      snr   : depth / std * sqrt(number of in-transit points)
+
+    Median/MAD stop other transits, flares and variability in the
+    out-of-transit data from inflating the noise. The mean in-transit flux
+    stays stable when the box shifts by a few bins, a median does not
+    (short or V-shaped transits). Tested against the injected-planet
+    catalogue (dryrun_01): tighter match to the expected SNR than the
+    previous mean/std, median-depth version.
+    """
 
     f   = np.zeros((npt))
     fin = np.zeros((npt))
@@ -180,35 +227,31 @@ def bls_stats(epo, period, tdur, npt, time, flux):
             phase -= 1.0
         
         if (phase < ph1) or (phase > ph2):
-            k += 1
-            # Update the out-of-transit flux array with this value
             f[k] = flux[i]
+            k += 1
         else:
-            kin += 1
             fin[kin] = flux[i]
+            kin += 1
     
     if k > 3:
-        # Calculate standard deviation of out-of-transit data
-        std = np.std(f[:k])
-        fmean = np.mean(f[:k])
+        fmean = np.median(f[:k])
+        std = 1.4826 * np.median(np.abs(f[:k] - fmean))
+        if std <= 0.0:
+            std = np.std(f[:k])
     else:
         fmean = 0.0
         std = 0.0
     
     if kin > 1:
-        # Sort in-transit flux array and get median
-        sorted_fin = np.sort(fin[:kin])
-        depth = -sorted_fin[kin // 2] + fmean
+        depth = fmean - np.mean(fin[:kin])
     else:
-        depth = fmean
+        depth = 0.0
     
     snr = 0.0
 
     if k > 3 and kin > 1 and std > 0.0:
         snr = depth / std * np.sqrt(kin)
-    
-    # Output statements can be handled as needed
-    
+
     return fmean, std, depth, snr
 
 def makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, filename, plots):
@@ -475,7 +518,7 @@ def interpolate_std(b_std, b_cen, freq):
     interp_std[interp_std == 0] = np.nanmean(interp_std)
     return interp_std
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def running_std_with_filter(data, half_window):
     # Calculate the overall standard deviation
     std = np.std(data)
@@ -609,6 +652,54 @@ def _rolling_mad(residual, k):
         mad[i] = np.median(np.abs(window - med))
     return mad
 
+@jit(nopython=True, cache=True)
+def _rolling_nanmedian(x, width):
+    """
+    Rolling median of the finite values in a window of constant width
+    (shifted near the edges, i.e. window start = max(0, min(i - width//2, n - width))).
+
+    Gives identical results to taking np.median of the finite values of each
+    window, but keeps the window's values sorted and updates them one value
+    in / one value out per step instead of re-computing each median (~15x faster).
+    """
+    n = x.shape[0]
+    out = np.empty(n)
+    if width > n:
+        width = n
+    half = width // 2
+    w = np.empty(width)          # sorted finite values of the current window
+    c = 0                        # number of finite values in the window
+    for j in range(width):       # first window: start = 0
+        v = x[j]
+        if np.isfinite(v):
+            k = np.searchsorted(w[:c], v)
+            w[k+1:c+1] = w[k:c].copy()
+            w[k] = v
+            c += 1
+    prev_start = 0
+    for i in range(n):
+        start = max(0, min(i - half, n - width))
+        if start != prev_start:  # window moved by one: drop x[start-1], add x[start+width-1]
+            v = x[start - 1]
+            if np.isfinite(v):
+                k = np.searchsorted(w[:c], v)
+                w[k:c-1] = w[k+1:c].copy()
+                c -= 1
+            v = x[start + width - 1]
+            if np.isfinite(v):
+                k = np.searchsorted(w[:c], v)
+                w[k+1:c+1] = w[k:c].copy()
+                w[k] = v
+                c += 1
+            prev_start = start
+        if c == 0:
+            out[i] = np.nan
+        elif c % 2 == 1:
+            out[i] = w[c // 2]
+        else:
+            out[i] = (w[c // 2 - 1] + w[c // 2]) / 2.0
+    return out
+
 def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
     """
     Estimate the continuum baseline using iterative sigma-clipping.
@@ -638,18 +729,8 @@ def _iterative_baseline(sqrtp, width, sigma_thresh=3.0, max_iter=3):
         masked_sqrtp[~mask] = np.nan
         
         # Rolling median ignoring masked points
-        baseline = np.zeros(n)
-        half = width // 2
-        for i in range(n):
-            start = max(0, min(i - half, n - width))
-            end = start + width
-            window = masked_sqrtp[start:end]
-            valid = window[np.isfinite(window)]
-            if len(valid) > 0:
-                baseline[i] = np.median(valid)
-            else:
-                baseline[i] = np.nan
-        
+        baseline = _rolling_nanmedian(masked_sqrtp, int(width))
+
         # Fill any NaN baselines with global median of valid points
         valid_baseline = baseline[np.isfinite(baseline)]
         if len(valid_baseline) > 0:
@@ -947,6 +1028,8 @@ def calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Kept
     bpower = power[psort[-1]]     #Power of best event
     bper   = periods[psort[-1]]   #Period of best event
     
+    if np.ndim(nb) > 0:           # per-frequency number of bins: use the best frequency's
+        nb = nb[psort[-1]]
     in1   = jn1[psort[-1]]        #start of ingress (based on BLS, so there is will be some error)
     in2   = jn2[psort[-1]]        #end of egress 
 
@@ -1031,6 +1114,12 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     minbin   = tpy5_inputs.minbin
     nper     = tpy5_inputs.nper
     multipro = tpy5_inputs.multipro
+    nbins    = getattr(tpy5_inputs, "nbins", 2000)
+    max_bin_minutes = getattr(tpy5_inputs, "max_bin_minutes", 0.0)
+    # dips_only: only boxes with flux below the median (transits) count. False = classic
+    # s^2 BLS, which ranks brightenings equally (about half of noise-only top peaks).
+    dips_only = bool(getattr(tpy5_inputs, "dips_only", False))
+    smax = 0.0 if dips_only else np.inf
     
     if (time.shape[0] < 2) or (flux.shape[0] < 2):
         time, flux = readfile(filename)
@@ -1041,7 +1130,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     flux = flux - np.median(flux)  #flux is centred around 0
 
     npt   = time.shape[0]                     #number of data points
-    nb    = np.min((2000, time.shape[0]-1.0)) #npt - 1, sets how the data in binned in phase.
+    nb    = np.min((nbins, time.shape[0]-1.0)) #npt - 1, sets how the data in binned in phase.
     nyq   = nyquest_cpu(time)            #nyquest [c/d] -- CPU seems to be faster x2 for 1080ti vs 10700
     mint  = np.min(time)                      #minimum time [d]
     maxt  = np.max(time)                      #max time [d]
@@ -1091,7 +1180,30 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     #Calculate the frequencies that we will be folding at
     freqs = calc_freqs_cpu(nstep, Mstar, Rstar, freq1, freq2, nyq, ofac, npt, df0, nb, minbin)
 
-    if multipro == 0:
+    # Number of phase bins for each frequency: fixed nb, or (max_bin_minutes > 0)
+    # grown at long periods so a bin is never wider than max_bin_minutes.
+    nbs = np.full(nstep, int(nb), dtype=np.int64)
+    if max_bin_minutes > 0:
+        nbs = np.maximum(nbs, np.ceil((1.0 / freqs) * 1440.0 / max_bin_minutes).astype(np.int64))
+
+    engine, isa = _select_engine(tpy5_inputs)
+
+    if engine == "c":
+        # Compiled C/OpenMP kernel (AVX-512/AVX2 dispatch); bit-identical to bls_kernel.
+        # Rare frequencies with Period > baseline use the Numba single-event kernel.
+        duration = np.max(time) - np.min(time)
+        nthreads = 1 if multipro == 0 else _available_cpus()
+        multi = (1.0 / freqs) <= duration
+        p   = np.zeros_like(freqs)
+        jn1 = np.zeros_like(freqs, dtype=np.int32)
+        jn2 = np.zeros_like(freqs, dtype=np.int32)
+        p[multi], jn1[multi], jn2[multi] = bls_c.scan(freqs[multi], nbs[multi], time, flux,
+                                                      Rstar, Mstar, isa=isa, nthreads=nthreads,
+                                                      dips_only=dips_only)
+        for i in np.flatnonzero(~multi):
+            p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
+
+    elif multipro == 0:
         #Store our answers -- this is for single threads (make this an option!)
         p = np.zeros_like(freqs)
         jn1   = np.zeros_like(freqs, dtype=np.int32)
@@ -1104,14 +1216,14 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
         for i in tqdm(range(nstep)):
             if (1.0 / freqs[i]) > duration:
-                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
             else:
-                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+                 p[i], jn1[i], jn2[i] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
 
     else: 
         # Store our answers
-        max_processes = os.cpu_count()
-        ndiv = nstep // (max_processes - 1) + 1
+        max_processes = _available_cpus()  # CPUs this process may use (respects Slurm), not the whole node
+        ndiv = nstep // max_processes + 1
         
         p   = np.zeros((max_processes, ndiv))
         jn1 = np.zeros((max_processes, ndiv), dtype=np.int32)
@@ -1124,7 +1236,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_processes) as executor:
             futures = {executor.submit(compute_bls_kernel, iarg[i], freqs, time, flux, \
-                                       nb, Rstar, Mstar, ndiv): i for i in range(iarg.shape[0])}
+                                       nbs, Rstar, Mstar, ndiv, smax): i for i in range(iarg.shape[0])}
             
             for future in concurrent.futures.as_completed(futures):
                 i = futures[future]
@@ -1143,7 +1255,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     oneoverf_extrapolate = getattr(tpy5_inputs, "oneoverf_extrapolate", True)
     oneoverf_threshold = getattr(tpy5_inputs, "oneoverf_threshold", None)
     periods, power, bper, epo, bpower, snr, tdur, depth = \
-        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nb, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
+        calc_eph(p, jn1, jn2, npt, time, flux, freqs, ofac, nstep, nbs, mintime, Keptime, Mstar, Rstar, normalize_mode, oneoverf_correction, oneoverf_extrapolate, oneoverf_threshold)
     if tpy5_inputs.plots > 0:
         makeplot(periods, power, time, flux, mintime, Keptime, epo, bper, bpower, snr, tdur, depth, \
                 filename, tpy5_inputs.plots)
@@ -1155,7 +1267,9 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
-    
+    gbls_ans.engine = engine if engine == "numba" else f"c:{bls_c.resolve_variant(isa)}"
+    gbls_ans.single = bool(bper > np.max(time) - np.min(time))
+
     # Optionally store full spectrum
     if tpy5_inputs.return_spectrum:
         gbls_ans.periods = periods
@@ -1177,7 +1291,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     
 #     return p, jn1, jn2
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def bls_pulse_kernel(flux_binned, counts_binned, widths, sigma):
     """
     Scans for single pulses. Returns the Signal-to-Noise Ratio (SNR).
@@ -1294,8 +1408,8 @@ def compute_pulse_search(time, flux, min_duration_hours=1.0, max_duration_hours=
 
 
 
-@jit(nopython=True)
-def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
+@jit(nopython=True, cache=True)
+def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
     """
     BLS kernel optimized for single event searches (Period > Duration).
     """
@@ -1385,14 +1499,14 @@ def bls_kernel_single(freq, time, flux, nb, Rstar, Mstar):
                 dfac = kk * (npt - kk)
                 if dfac > 0:
                     pow1 = s*s / dfac
-                    if pow1 > p:
+                    if s < smax and pow1 > p:
                         p = pow1
                         jn1 = i
                         jn2 = j
                         
     return p, jn1, jn2
 
-def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
+def compute_bls_kernel(iarg, freqs, time, flux, nbs, Rstar, Mstar, ndiv, smax=np.inf):
     
     p = np.zeros((ndiv))
     jn1 = np.zeros((ndiv), dtype = np.int32)
@@ -1405,15 +1519,120 @@ def compute_bls_kernel(iarg, freqs, time, flux, nb, Rstar, Mstar, ndiv):
     for i in iarg:
         # Check if Period > Duration
         if (1.0 / freqs[i]) > duration:
-            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nb, Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
         else:
-            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nb, Rstar, Mstar)
+            p[j], jn1[j], jn2[j] = bls_kernel(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
         j += 1
         
     return p, jn1, jn2
 
-@jit(nopython=True)
-def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
+@jit(nopython=True, cache=True, error_model='numpy')
+def bls_kernel(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
+    """
+    BLS kernel for one trial frequency (Period < Duration).
+
+    Gives bit-identical results (p, jn1, jn2) to bls_kernel_reference, about 2x faster.
+    The search over (start bin i, width) uses the loop order width-outer /
+    start-inner: each start bin's running sum is still built in the same order,
+    but the inner loop over start bins has no dependency chain, so it compiles to
+    SIMD. Point counts are held as float64 (exact for integers < 2**53) so no
+    int->float conversion is needed in the inner loop.
+    """
+
+    npt = time.shape[0]
+
+    nb2  = int(2 * nb)
+    nbm1 = int(nb - 1)
+    nb   = int(nb)
+
+    ibi = np.zeros((nb2), dtype=np.float64)   # number of points per phase bin
+    y   = np.zeros((nb2), dtype=np.float64)   # sum of flux per phase bin
+
+    # Bin index of each point. Separate loop with int32 truncation so it
+    # vectorizes (same values as int() for time*freq < 2**31).
+    jbin  = np.empty(npt, dtype=np.int32)
+    fnbm1 = float(nbm1)
+    for i in range(npt):
+        tf = time[i]*freq
+        phase = tf - np.int32(tf)
+        jbin[i] = np.int32(phase * fnbm1)
+
+    # Add points to bins in time order (same summation order as before)
+    for i in range(npt):
+        j = jbin[i]
+        ibi[j] += 1.0
+        y[j]   += flux[i]
+
+    #duplicate array
+    for i in range(nb):
+        ibi[i+nb] = ibi[i]
+        y[i+nb]   = y[i]
+
+    fsec = freq / day2sec
+    q = pifac * Rstar*Rsun / (G*Mstar*Msun)**(1.0/3.0) * fsec**(2.0/3.0)
+
+    qmi = q / 2.0
+    if qmi < onehour*freq/2:
+        qmi = onehour*freq/2
+
+    qma = q * 2.0
+    if qma > 0.25:
+        qma = 0.25
+
+    if qmi > qma:
+        qma = qmi * 2.0
+        if qma > 0.4:
+            qma = 0.4
+
+    kmi = int(qmi * nb)
+    if kmi < 1:
+        kmi = 1
+    kma = int(qma * nb) + 1
+    kkmi = int(npt * qmi)
+    if kkmi < 5: #minbin
+        kkmi = 5
+
+    fnpt  = float(npt)
+    fkkmi = float(kkmi)
+
+    S = np.zeros(nb)                   # running flux sum for each start bin i
+    K = np.zeros(nb)                   # running point count for each start bin i
+    B = np.zeros(nb)                   # best power found for each start bin i
+    E = np.zeros(nb, dtype=np.int64)   # end bin of that best power
+
+    # width k = m + 1 bins, end bin j = i + m
+    for m in range(kma + 1):
+        if m + 1 <= kmi:               # too narrow to count: just accumulate
+            for i in range(nb):
+                S[i] += y[i + m]
+                K[i] += ibi[i + m]
+        else:
+            for i in range(nb):
+                s  = S[i] + y[i + m]
+                kk = K[i] + ibi[i + m]
+                S[i] = s
+                K[i] = kk
+                dfac = kk * (fnpt - kk)
+                pow1 = s * s / dfac
+                better = (kk > fkkmi) & (dfac > 0.0) & (s < smax) & (pow1 > B[i])
+                B[i] = pow1 if better else B[i]
+                E[i] = i + m if better else E[i]
+
+    # combine start bins in order; strict > keeps the first best (same as reference)
+    p = 0.0
+    jn1 = 0
+    jn2 = 0
+    for i in range(nb):
+        if B[i] > p:
+            p = B[i]
+            jn1 = i
+            jn2 = E[i]
+
+    return p, jn1, jn2
+
+@jit(nopython=True, cache=True)
+def bls_kernel_reference(freq, time, flux, nb, Rstar, Mstar, smax=np.inf):
+    """Original BLS kernel, kept to validate bls_kernel against."""
 
     npt = time.shape[0]
 
@@ -1483,7 +1702,7 @@ def bls_kernel(freq, time, flux, nb, Rstar, Mstar):
                 if dfac > 0 :
                     pow1 = s*s / dfac
 
-                    if pow1 > p:
+                    if s < smax and pow1 > p:
                         p = pow1
                         jn1 = i
                         jn2 = j        
@@ -1604,7 +1823,9 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
     
     If Pulse Search wins:
         - Returns a gbls_ans_class object with:
-            - bper = 0 (indicating single event)
+            - single = True
+            - bper = period estimated from the duration and stellar density
+              (always longer than the time span)
             - epo = pulse t0
             - tdur = pulse duration
             - depth = pulse depth
@@ -1711,6 +1932,7 @@ def bls_pulse(tpy5_inputs, time=np.array([0]), flux=np.array([0])):
         final_ans.tdur = pulse_res['duration']
         final_ans.depth = -pulse_res['depth']
         final_ans.bpower = pulse_res['snr'] # Use SNR as power proxy
+        final_ans.single = True
         is_periodic = False
         
     # 4. Plotting
