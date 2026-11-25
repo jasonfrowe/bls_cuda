@@ -61,16 +61,23 @@ def _available_cpus():
 def _select_engine(tpy5_inputs):
     """Pick the BLS kernel from tpy5_inputs.bls_engine / bls_isa.
 
-    bls_engine: "auto" (C kernel if built, else Numba), "c" (error if unavailable), "numba".
+    bls_engine: "auto" (C kernel if built, else Numba), "c" (error if unavailable), "numba",
+                "cuda" (GPU kernel of bls_gpu; error if no GPU). "auto" never picks the GPU:
+                production runs one search per core, and those must not share one GPU unasked.
     bls_isa:    "auto" or a bls_c variant name (avx512, avx2, avx512_nodiv, avx2_div, ...).
-    Returns (engine, isa) with engine in {"c", "numba"}.
+    Returns (engine, isa) with engine in {"c", "numba", "cuda"}.
     """
     engine = str(getattr(tpy5_inputs, "bls_engine", "auto")).lower()
     isa = getattr(tpy5_inputs, "bls_isa", "auto")
     if engine == "numba":
         return "numba", isa
+    if engine in ("cuda", "gpu"):
+        from pytfit5 import bls_gpu
+        if not bls_gpu.available():
+            raise RuntimeError(f"bls_engine='cuda' but the GPU kernel is unavailable: {bls_gpu.load_error()}")
+        return "cuda", isa
     if engine not in ("auto", "c"):
-        raise ValueError(f"bls_engine must be 'auto', 'c' or 'numba', got {engine!r}")
+        raise ValueError(f"bls_engine must be 'auto', 'c', 'numba' or 'cuda', got {engine!r}")
     if not bls_c.available():
         if engine == "c":
             raise RuntimeError(f"bls_engine='c' but the C kernel is unavailable: {bls_c.load_error()}")
@@ -661,6 +668,7 @@ def _rolling_nanmedian(x, width):
     Gives identical results to taking np.median of the finite values of each
     window, but keeps the window's values sorted and updates them one value
     in / one value out per step instead of re-computing each median (~15x faster).
+    The sorted values are shifted in place, with no allocation per step.
     """
     n = x.shape[0]
     out = np.empty(n)
@@ -673,7 +681,8 @@ def _rolling_nanmedian(x, width):
         v = x[j]
         if np.isfinite(v):
             k = np.searchsorted(w[:c], v)
-            w[k+1:c+1] = w[k:c].copy()
+            for q in range(c, k, -1):   # shift w[k:c] up by one, in place
+                w[q] = w[q - 1]
             w[k] = v
             c += 1
     prev_start = 0
@@ -683,12 +692,14 @@ def _rolling_nanmedian(x, width):
             v = x[start - 1]
             if np.isfinite(v):
                 k = np.searchsorted(w[:c], v)
-                w[k:c-1] = w[k+1:c].copy()
+                for q in range(k, c - 1):   # shift w[k+1:c] down by one
+                    w[q] = w[q + 1]
                 c -= 1
             v = x[start + width - 1]
             if np.isfinite(v):
                 k = np.searchsorted(w[:c], v)
-                w[k+1:c+1] = w[k:c].copy()
+                for q in range(c, k, -1):
+                    w[q] = w[q - 1]
                 w[k] = v
                 c += 1
             prev_start = start
@@ -1188,8 +1199,9 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
 
     engine, isa = _select_engine(tpy5_inputs)
 
-    if engine == "c":
-        # Compiled C/OpenMP kernel (AVX-512/AVX2 dispatch); bit-identical to bls_kernel.
+    if engine in ("c", "cuda"):
+        # Compiled C/OpenMP kernel (AVX-512/AVX2 dispatch; bit-identical to bls_kernel) or
+        # the GPU kernel (same boxes; p to ~1e-7, see bls_gpu).
         # Rare frequencies with Period > baseline use the Numba single-event kernel.
         duration = np.max(time) - np.min(time)
         nthreads = 1 if multipro == 0 else _available_cpus()
@@ -1197,9 +1209,14 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
         p   = np.zeros_like(freqs)
         jn1 = np.zeros_like(freqs, dtype=np.int32)
         jn2 = np.zeros_like(freqs, dtype=np.int32)
-        p[multi], jn1[multi], jn2[multi] = bls_c.scan(freqs[multi], nbs[multi], time, flux,
-                                                      Rstar, Mstar, isa=isa, nthreads=nthreads,
-                                                      dips_only=dips_only)
+        if engine == "cuda":
+            from pytfit5 import bls_gpu
+            p[multi], jn1[multi], jn2[multi] = bls_gpu.scan(freqs[multi], nbs[multi], time, flux,
+                                                            Rstar, Mstar, dips_only=dips_only)
+        else:
+            p[multi], jn1[multi], jn2[multi] = bls_c.scan(freqs[multi], nbs[multi], time, flux,
+                                                          Rstar, Mstar, isa=isa, nthreads=nthreads,
+                                                          dips_only=dips_only)
         for i in np.flatnonzero(~multi):
             p[i], jn1[i], jn2[i] = bls_kernel_single(freqs[i], time, flux, nbs[i], Rstar, Mstar, smax)
 
@@ -1267,7 +1284,7 @@ def bls(tpy5_inputs, time = np.array([0]), flux = np.array([0])):
     gbls_ans.snr    = snr
     gbls_ans.tdur   = tdur
     gbls_ans.depth  = depth
-    gbls_ans.engine = engine if engine == "numba" else f"c:{bls_c.resolve_variant(isa)}"
+    gbls_ans.engine = f"c:{bls_c.resolve_variant(isa)}" if engine == "c" else engine
     gbls_ans.single = bool(bper > np.max(time) - np.min(time))
 
     # Optionally store full spectrum

@@ -5,14 +5,15 @@ kernel, and a Python implementation of TransitFit5.**
 
 The package is installed as `pytfit5` from this repository (`bls_cuda`). It provides:
 
-- a periodic BLS search, with a compiled C/OpenMP kernel (AVX-512/AVX2 chosen at run time) and a Numba fallback;
+- a periodic BLS search, with a compiled C/OpenMP kernel (AVX-512/AVX2 chosen at run time), an optional
+  CUDA kernel for NVIDIA GPUs, and a Numba fallback;
 - a single-event ("pulse") search for one-off transits;
 - detrending and outlier rejection for long light curves;
 - a transit model (Mandel & Agol with Kipping limb-darkening parametrisation, eccentric orbits, TTVs), least-squares fitting and DE-MCMC;
 - synthetic light curves and injection/recovery tools.
 
 The original CUDA (GPU) BLS scripts are kept in `cudaFiles/` for reference; they are not part of the
-installed package.
+installed package (the GPU kernel is now `pytfit5.bls_gpu`).
 
 ## Installation
 
@@ -46,10 +47,30 @@ faster than Numba on an Intel Skylake-SP node (48 threads) and 4.0 times faster 
 (Zen 4) node (192 threads). The fastest SIMD variant depends on the CPU, so `bls_isa="auto"` picks
 `avx512_div` on AMD and `avx512_nodiv` on other CPUs with AVX-512, then AVX2, then scalar code.
 
+### The GPU kernel
+
+`pip install ".[cuda]"` adds `numba-cuda`, which compiles the CUDA BLS kernel (`pytfit5.bls_gpu`) on
+first use (a few seconds, cached afterwards). It needs an NVIDIA GPU and driver; the CUDA toolkit comes
+from pip. Select it with `bls_engine="cuda"`; `"auto"` never chooses the GPU, because production runs
+one search per core and those should not share one GPU unless asked.
+
+```python
+from pytfit5 import bls_gpu
+print(bls_gpu.available(), bls_gpu.max_nb())      # True 12032 (RTX PRO 4000 Blackwell)
+```
+
+The GPU puts every point in the same phase bin as the CPU kernels (FP64 phases), bins flux and counts
+exactly (fixed-point integers), and searches the boxes in FP32, so its periodogram matches the CPU's to
+~1e-7 and the best box is the same except at exact ties. Results are deterministic. On an RTX PRO 4000
+Blackwell SFF (70 W) the kernel searched a simulated Roman GBTDS season (production grid, 21,348
+frequencies) in 0.019 s, against 4.2 s on one Skylake-SP core with the C kernel; the full production
+pipeline (two detrending windows, 10 passes, pulse search) ran ~10,000 one-season light curves per hour
+with 8 CPU workers sharing the GPU, against ~500 for the same 8 workers with the C kernel.
+
 ### Tests
 
 ```bash
-pytest tests/                                     # C kernel vs Numba (skipped if not built), period validation
+pytest tests/                                     # C kernel vs Numba, GPU vs CPU (each skipped if unavailable), ...
 PYTFIT5_TEST_LC=lightcurve.dat pytest tests/      # also check a real light curve (time, flux columns)
 ```
 
@@ -182,7 +203,8 @@ transit close-up with the BLS parameters.
 
 Contributions are welcome. Open items:
 
-1. Optimise GPU memory transfers (CUDA scripts).
+1. GPU: batch several light curves per launch, and overlap the CPU spectrum normalisation with the
+   GPU search.
 2. Allow different transit-model parameters for different planets.
 3. Better examples for TTV fitting.
 
@@ -213,6 +235,10 @@ Rowe et al. 2015, ApJS, 217, 16.
 Jason Rowe - jason@jasonrowe.org
 
 ## Change log
+
+- 2026/11/25: CUDA BLS kernel `pytfit5.bls_gpu` (`bls_engine="cuda"`, optional `[cuda]` extra): same
+  bins and boxes as the CPU kernels, deterministic; replaces the scripts in `cudaFiles/`. The rolling
+  median of the iterative-baseline normalisation no longer allocates per step (~25% faster, same results).
 
 - 2026/11/19: Detrender (`polyfilter`) and outlier cut compiled with Numba: 60-100x faster, same
   results; `multipro=1` uses threads instead of a process pool. The outlier cut no longer uses stale
