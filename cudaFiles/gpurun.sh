@@ -4,14 +4,19 @@
 # Usage: gpurun.sh LOGFILE CMD...   (env LIMIT, default 83)
 LIMIT=${LIMIT:-83}
 LOG=$1; shift
-nvidia-smi --query-gpu=timestamp,temperature.gpu,power.draw,clocks.sm,fan.speed,utilization.gpu,clocks_event_reasons.active \
-  --format=csv,noheader,nounits -lms 1000 > "$LOG" &
+# columns: timestamp, temp C, power W, SM MHz, fan %, util %, clock-limit reasons (older drivers name
+# the last field clocks_throttle_reasons)
+Q=timestamp,temperature.gpu,power.draw,clocks.sm,fan.speed,utilization.gpu,clocks_event_reasons.active
+nvidia-smi --query-gpu=$Q --format=csv,noheader >/dev/null 2>&1 || Q=${Q/clocks_event_reasons/clocks_throttle_reasons}
+nvidia-smi --query-gpu=$Q --format=csv,noheader,nounits -lms 1000 > "$LOG" &
 SMI=$!
 "$@" &
 JOB=$!
 while kill -0 $JOB 2>/dev/null; do
-  T=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits)
-  T=${T%.*}; if [ "${T:-0}" -ge "$LIMIT" ]; then
+  # hottest visible GPU (several lines on a multi-GPU node); non-numeric (e.g. [N/A]) counts as 0
+  T=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits | sort -n | tail -1)
+  T=${T%.*}; [[ "$T" =~ ^[0-9]+$ ]] || T=0
+  if [ "$T" -ge "$LIMIT" ]; then
     echo "!!! GPU at ${T} C >= ${LIMIT} C: killing job" >&2
     kill $JOB; sleep 1; kill -9 $JOB 2>/dev/null
   fi
