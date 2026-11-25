@@ -1,4 +1,54 @@
 import os
+import glob
+
+# Ensure Numba uses the pip-installed CUDA 12 toolkit instead of the system CUDA 13.
+# This fixes the "libnvvm : error: -arch=compute_61 is an unsupported option" error 
+# since CUDA 13 dropped support for Pascal (compute_61).
+_venv_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".venv"))
+_cuda_home = os.path.join(_venv_dir, "cuda_home")
+
+if not os.path.exists(_cuda_home):
+    try:
+        os.makedirs(os.path.join(_cuda_home, "nvvm", "lib64"), exist_ok=True)
+        os.makedirs(os.path.join(_cuda_home, "lib64"), exist_ok=True)
+
+        # Symlink nvvm/lib64
+        src_nvvm_lib64 = os.path.join(_venv_dir, "lib/python3.14/site-packages/nvidia/cuda_nvcc/nvvm/lib64")
+        dst_nvvm_lib64 = os.path.join(_cuda_home, "nvvm", "lib64")
+        src_libnvvm = os.path.join(src_nvvm_lib64, "libnvvm.so")
+        dst_libnvvm = os.path.join(dst_nvvm_lib64, "libnvvm.so.4")
+        if os.path.exists(src_libnvvm) and not os.path.exists(dst_libnvvm):
+            os.symlink(src_libnvvm, dst_libnvvm)
+
+        # Symlink nvvm/libdevice
+        src_nvvm_libdevice = os.path.join(_venv_dir, "lib/python3.14/site-packages/nvidia/cuda_nvcc/nvvm/libdevice")
+        dst_nvvm_libdevice = os.path.join(_cuda_home, "nvvm", "libdevice")
+        if os.path.exists(src_nvvm_libdevice) and not os.path.exists(dst_nvvm_libdevice):
+            os.symlink(src_nvvm_libdevice, dst_nvvm_libdevice)
+
+        # Symlink cudart to lib64
+        src_cudart = os.path.join(_venv_dir, "lib/python3.14/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12")
+        dst_cudart = os.path.join(_cuda_home, "lib64", "libcudart.so.12")
+        if os.path.exists(src_cudart) and not os.path.exists(dst_cudart):
+            os.symlink(src_cudart, dst_cudart)
+
+        src_cudadevrt = os.path.join(_venv_dir, "lib/python3.14/site-packages/nvidia/cuda_runtime/lib/libcudadevrt.a")
+        dst_cudadevrt = os.path.join(_cuda_home, "lib64", "libcudadevrt.a")
+        if os.path.exists(src_cudadevrt) and not os.path.exists(dst_cudadevrt):
+            os.symlink(src_cudadevrt, dst_cudadevrt)
+
+        nvrtc_libs = glob.glob(os.path.join(_venv_dir, "lib/python3.14/site-packages/nvidia/cuda_nvrtc/lib/libnvrtc.so.*"))
+        if nvrtc_libs:
+            src_nvrtc = nvrtc_libs[0]
+            dst_nvrtc = os.path.join(_cuda_home, "lib64", os.path.basename(src_nvrtc))
+            if not os.path.exists(dst_nvrtc):
+                os.symlink(src_nvrtc, dst_nvrtc)
+    except Exception as e:
+        print(f"Warning: Failed to setup custom CUDA_HOME for Numba: {e}")
+
+if os.path.exists(_cuda_home):
+    os.environ["CUDA_HOME"] = _cuda_home
+    os.environ["CUDA_PATH"] = _cuda_home
 
 import numpy as np
 
@@ -624,8 +674,8 @@ def compute_bls(freqs, power, jn1, jn2, time_g, flux_g, const_g, dconst_g):
     n_freqs = len(freqs)
 
     # Define the CUDA block and grid sizes
-    threads_per_block = 128 # make a mulitple of 32
-    blocks_per_grid   = 128 # (n_freqs + (threads_per_block - 1)) // threads_per_block
+    threads_per_block = 128 # 128 threads per block will cooperate on 1 frequency
+    blocks_per_grid   = n_freqs # Exact 1:1 mapping of blocks to frequencies
 
     # Allocate memory on the device
     freqs_g = cuda.to_device(freqs)
@@ -646,8 +696,13 @@ def compute_bls(freqs, power, jn1, jn2, time_g, flux_g, const_g, dconst_g):
 @cuda.jit
 def bls_kernel(time_g, flux_g, const_g, dconst_g, freqs_g, power_g, jn1_g, jn2_g):
 
-    start = cuda.grid(1)      # 1 = one dimensional thread grid, returns a single value
-    stride = cuda.gridsize(1) # 
+    nk = cuda.blockIdx.x      # Each block perfectly maps to 1 frequency
+    tx = cuda.threadIdx.x     # Local thread ID (0-127)
+    bdim = cuda.blockDim.x    # Total threads in block (128)
+    
+    # Boundary check (in case n_freqs isn't perfectly matched, though here it is)
+    if nk >= freqs_g.shape[0]:
+        return
 
     nb1 = const_g[0] - 1  # nb - 1
     nb  = const_g[0]      # nb
@@ -667,79 +722,119 @@ def bls_kernel(time_g, flux_g, const_g, dconst_g, freqs_g, power_g, jn1_g, jn2_g
 
     qfac = pifac * Rstar*Rsun / (G*Mstar*Msun)**(1.0/3.0)
 
-    #4000 = nb * 2.  So if nb changes, we need to change this
-    ibi = cuda.local.array(4096, dtype=np.int32)
-    y   = cuda.local.array(4096, dtype=np.float64)
+    # Use true shared memory to bin the folded lightcurve.
+    # We allocate 2048 which covers the requested nb up to 2000 comfortably 
+    # and keeps us under the 48KB static shared memory limits of Pascal/Turing.
+    ibi = cuda.shared.array(2048, dtype=np.int32)
+    y   = cuda.shared.array(2048, dtype=np.float64)
+    
+    # Thread block reduction arrays
+    best_p_shared = cuda.shared.array(128, dtype=np.float64)
+    best_i_shared = cuda.shared.array(128, dtype=np.int32)
+    best_j_shared = cuda.shared.array(128, dtype=np.int32)
 
-    for nk in range(start, freqs_g.shape[0], stride):
+    # 1. Initialize Shared Memory collaboratively across the block
+    for i in range(tx, nb, bdim):
+        iby = 0
+        yy = 0.0
+        if i < 2048:
+            ibi[i] = iby
+            y[i]   = yy
             
-        freq = freqs_g[nk]
+    cuda.syncthreads()
 
-        ohf = onehour*freq
+    freq = freqs_g[nk]
+    fsec = freq / day2sec
+    ohf = onehour*freq
 
-        for i in range(nb):
-            ibi[i] = 0
-            y[i]   = 0.0
-        
-        for i in range(npt):
-            phase = time_g[i]*freq - int(time_g[i]*freq)
-            j = int(phase * nb1)
-    
-            ibi[j] += 1
-            y[j]   += flux_g[i]
-    
-        #duplicate array
-        for i in range(nb):
-            ibi[i + nb] = ibi[i]
-            y[i + nb]   = y[i]
+    # 2. Phase fold collaboratively 
+    # Use grid stride loop across npt, atomically add to shared memory
+    for i in range(tx, npt, bdim):
+        phase = time_g[i]*freq - int(time_g[i]*freq)
+        j = int(phase * nb1)
+        cuda.atomic.add(ibi, j, 1)        # Because this is SHARED memory, atomics are fast!
+        cuda.atomic.add(y, j, flux_g[i])
 
+    cuda.syncthreads()
+
+    q = qfac * fsec**(2.0/3.0)
+
+    qmi = q / 2.0
+    if qmi < ohf:
+        qmi = ohf
+
+    qma = q * 2.0
+    if qma > 0.25:
+        qma = 0.25
+
+    if qmi > qma:
+        qma = qmi * 2.0
+        if qma > 0.4:
+            qma = 0.4
+
+    kmi = int(qmi * nb)
+    if kmi < 1:
+        kmi = 1
+    kma = int(qma * nb) + 1
+    kkmi = int(npt * qmi)
+    if kkmi < 5: #minbin
+        kkmi = 5
+    nbkma = nb + kma
+
+    best_power = 0.0
+    best_i = -1
+    best_j = -1
+
+    # 4. Search bins collaboratively (dividing 'i' loop space amongst the 128 threads)
+    for i in range(tx, nb, bdim):
+        s = 0.0
+        k = 0
+        kk = 0
+        nb2 = i + kma + 1
+
+        for j in range(i, nb2):
+            # Phase wrap via modulo operator instead of duplicate arrays
+            wrap_j = j
+            if wrap_j >= nb:
+                wrap_j -= nb
+                
+            k  = k + 1
+            kk = kk + ibi[wrap_j]
+            s  = s  + y[wrap_j]
+
+            if k > kmi and kk > kkmi:
+                dfac = (kk * (npt - kk)) #const[1] = npt
+                if dfac > 0 :
+                    pow1 = s * s / dfac
+                    if pow1 > best_power:
+                        best_power = pow1
+                        best_i = i
+                        best_j = j
+                        
+    # 5. Parallel Block Reduction 
+    best_p_shared[tx] = best_power
+    best_i_shared[tx] = best_i
+    best_j_shared[tx] = best_j
     
-        fsec = freq / day2sec
-        q = qfac * fsec**(2.0/3.0)
+    cuda.syncthreads()
     
-        qmi = q / 2.0
-        if qmi < ohf:
-            qmi = ohf
-    
-        qma = q * 2.0
-        if qma > 0.25:
-            qma = 0.25
-    
-        if qmi > qma:
-            qma = qmi * 2.0
-            if qma > 0.4:
-                qma = 0.4
-    
-        kmi = int(qmi * nb)
-        if kmi < 1:
-            kmi = 1
-        kma = int(qma * nb) + 1
-        kkmi = int(npt * qmi)
-        if kkmi < 5: #minbin
-            kkmi = 5
-        nbkma = nb + kma
-    
-        power = 0
-    
-        for i in range(nb):
-            s = 0.0
-            k = 0
-            kk = 0
-            nb2 = i + kma + 1
-    
-            for j in range(i, nb2):
-                k  = k + 1
-                kk = kk + ibi[j]
-                s  = s  + y[j]
-    
-                if k > kmi and kk > kkmi:
-                    dfac = (kk * (npt - kk)) #const[1] = npt
-                    if dfac > 0 :
-                        pow1 = s * s / dfac
-                        old_max = cuda.atomic.max(power_g, nk, pow1)
-                        if pow1 > old_max:
-                            cuda.atomic.exch(jn1_g, nk, i)
-                            cuda.atomic.exch(jn2_g, nk, j)
+    # We do a simple tree reduction on the 128 elements inside Shared Memory to find the absolute max for this block (frequency)
+    stride = bdim // 2
+    while stride > 0:
+        if tx < stride:
+            if best_p_shared[tx + stride] > best_p_shared[tx]:
+                best_p_shared[tx] = best_p_shared[tx + stride]
+                best_i_shared[tx] = best_i_shared[tx + stride]
+                best_j_shared[tx] = best_j_shared[tx + stride]
+        stride = stride // 2
+        cuda.syncthreads()
+
+    # Thread 0 writes the absolute result to the Global Array for this frequency
+    if tx == 0:
+        if best_p_shared[0] > 0.0:
+            power_g[nk] = best_p_shared[0]
+            jn1_g[nk] = best_i_shared[0]
+            jn2_g[nk] = best_j_shared[0]
 
 
 

@@ -10,6 +10,6 @@ detrender).
 | `pytfit5_example.ipynb` | The original pytfit5 walk-through (detrending, BLS, fitting, MCMC) |
 | `pytfit5_BOI-1.ipynb` | The same workflow applied to one candidate (BOI-1) |
 | `backup_code.ipynb` | Development scratch code for period validation |
-| `bls_cuda.ipynb`, `bls_cuda_v2.ipynb` | The CUDA (GPU) BLS scripts in `cudaFiles/` |
+| `bls_cuda.ipynb` | The CUDA (GPU) BLS scripts in `cudaFiles/` (`bls_cuda_v2.ipynb` is in `cudaFiles/`) |
 
 For current usage, see [`../roman_example.ipynb`](../roman_example.ipynb) and [API.md](../../API.md).

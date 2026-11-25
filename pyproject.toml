@@ -28,6 +28,10 @@ dependencies = [
     "astroquery",
 ]
 
+[project.optional-dependencies]
+# GPU BLS kernel (pytfit5.bls_gpu); numba-cuda 0.30 needs numpy < 2.5
+cuda = ["numba-cuda[cu13]", "numpy<2.5"]
+
 [project.urls]
 "Homepage" = "https://github.com/jasonfrowe/bls_cuda"
 "Bug Tracker" = "https://github.com/jasonfrowe/bls_cuda/issues"

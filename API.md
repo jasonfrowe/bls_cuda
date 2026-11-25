@@ -15,6 +15,7 @@ installation and a quick start, see [README.md](README.md).
 3. [Photometry and Detrending (`pytfit5.transitPy5`)](#photometry-and-detrending-pytfit5transitpy5)
 4. [BLS Search (`pytfit5.bls_cpu`)](#bls-search-pytfit5bls_cpu)
 5. [Compiled Kernel (`pytfit5.bls_c`)](#compiled-kernel-pytfit5bls_c)
+   - [GPU Kernel (`pytfit5.bls_gpu`)](#gpu-kernel-pytfit5bls_gpu)
 6. [Transit Model (`pytfit5.transitmodel`)](#transit-model-pytfit5transitmodel)
 7. [Fitting and MCMC](#fitting-and-mcmc)
 8. [Synthetic Light Curves (`pytfit5.synthetic`)](#synthetic-light-curves-pytfit5synthetic)
@@ -33,6 +34,7 @@ Import the submodules directly; the package does not define short aliases.
 import pytfit5.bls_cpu as gbls            # BLS periodic and single-event searches
 import pytfit5.transitPy5 as tpy5         # configuration, photometry I/O, detrending, MCMC I/O
 from pytfit5 import bls_c                 # compiled C/OpenMP BLS kernel (optional extension)
+from pytfit5 import bls_gpu               # CUDA BLS kernel (optional: pip install ".[cuda]")
 import pytfit5.transitmodel as transitm   # transit model
 import pytfit5.transitfit as transitf     # least-squares fitting
 import pytfit5.transitmcmc as tmcmc       # DE-MCMC fitting
@@ -76,7 +78,7 @@ searches. (`gbls.gbls_inputs_class` is a deprecated alias of the same class.)
 | `oneoverf_correction` | `True` | Subtract the running baseline of the periodogram before normalising |
 | `oneoverf_extrapolate` | `True` | For periods longer than `oneoverf_threshold`, replace the baseline (and, in some modes, the noise) by its median over periods of 2/3 to 1 time span |
 | `oneoverf_threshold` | `None` | Period (days) above which to extrapolate. `None`: the time span |
-| `bls_engine` | `"auto"` | Kernel: `"auto"` (compiled C kernel if available, else Numba), `"c"` (error if unavailable), `"numba"`. Results are bit-identical |
+| `bls_engine` | `"auto"` | Kernel: `"auto"` (compiled C kernel if available, else Numba), `"c"` (error if unavailable), `"numba"`, `"cuda"` (GPU kernel, see [`bls_gpu`](#gpu-kernel-pytfit5bls_gpu); never chosen by `"auto"`). C and Numba results are bit-identical; the GPU's agree to ~1e-7 |
 | `bls_isa` | `"auto"` | SIMD variant of the C kernel: `"auto"`, `"avx512"`, `"avx2"`, `"scalar"`, or explicitly `"avx512_nodiv"`, `"avx512_div"`, `"avx2_div"`, `"avx2_nodiv"` (see [`bls_c`](#compiled-kernel-pytfit5bls_c)) |
 | `multipro` | `1` | `1`: use all CPUs available to the process (respects Slurm and taskset); `0`: one thread |
 | `return_spectrum` | `False` | Store the periodogram in the result |
@@ -331,6 +333,35 @@ Variants: `scalar`, `avx2_div`, `avx2_nodiv`, `avx512_div`, `avx512_nodiv` (alia
 `scalar` on AMD CPUs, and of `avx512_nodiv`, `avx2_div`, `scalar` otherwise. On an AMD EPYC 9654 (Zen 4)
 `avx512_div` was 12% faster than `avx512_nodiv`; on an Intel Xeon Silver 4116 (Skylake-SP) the
 division-free variant was faster.
+
+### GPU Kernel (`pytfit5.bls_gpu`)
+
+CUDA BLS kernel for NVIDIA GPUs, written with `numba-cuda` (install with `pip install ".[cuda]"`).
+`bls()` uses it with `bls_engine="cuda"`; frequencies with periods longer than the time span still use
+the Numba single-event kernel, as with the C kernel.
+
+| Function | Description |
+|---|---|
+| `available()` | `True` if `numba-cuda` imported and a GPU is visible |
+| `load_error()` | Why it is unavailable (`None` if it is available) |
+| `max_nb()` | Largest number of phase bins searched in shared memory (8 bytes per bin; ~12,000 with 100 KB per block) |
+| `scan(freqs, nbs, time, flux, Rstar=1.0, Mstar=1.0, dips_only=False, global_mem_mb=512, max_shared_nb=None)` | Same inputs and outputs as `bls_c.scan`. Frequencies with `nb > max_nb()` keep their bins in global memory, in launches of at most `global_mem_mb` MB |
+| `pack_flux(flux)` | The fixed-point packing used for binning (see below); returns `packed, cb, 2^-e` |
+| `limits(freqs, nbs, npt, Rstar, Mstar)` | Box-width limits `kmi, kma, kkmi` per frequency, as in the CPU kernels |
+
+How it differs from the CPU kernels. One thread block searches one frequency.
+
+- **Phase**: FP64, the CPU kernels' operations, so every point falls in the same bin.
+- **Binning**: each point is one int64, `round(flux 2^e) << cb` plus 1, so one shared-memory integer
+  atomic adds both its flux and its count. Integer sums are exact and independent of the order in
+  which threads add them, so results are deterministic.
+- **Search**: FP32 running sums with the division-free comparison of the C kernel
+  (`s² D_best > N_best dfac`), ties going to the first start bin as on the CPU. FP64 runs at 1/32-1/64
+  of the FP32 rate on most NVIDIA cards (1/31 measured on an RTX PRO 4000 Blackwell).
+- **Power**: the winning box's power is recomputed in FP64 from its FP32 bin sums.
+
+So `p` agrees with the CPU to ~1e-7 relative and `jn1, jn2` agree except where two boxes have the same
+power to FP32 precision (none in the tests).
 
 ---
 
