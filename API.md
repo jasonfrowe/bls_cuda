@@ -421,7 +421,7 @@ model = transitm.transitModel(sol, time, itime, nintg=41)
 
 ## Fitting and MCMC
 
-### `transitfit.fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc=-1)`
+### `transitfit.fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc=-1, **ls_kwargs)`
 
 Least-squares fit of the parameters named in `params_to_fit` (e.g.
 `["rho", "zpt", "t0", "per", "bb", "rdr"]`) to `phot`. It uses `flux_f`, `ferr` and `itime` of the
@@ -429,6 +429,11 @@ points with `icut == 0` **and** `tflag == 1`, so mark the data around the transi
 `keplerian.mark_intransit_data(phot, sol)` (note that `run_polyfilter_iterative` also writes
 `tflag`). Returns a new `transit_model_class` with the fitted values and uncertainties.
 `demcmcRoutine` selects its data the same way.
+
+Extra keyword arguments (`ls_kwargs`) are passed to `scipy.optimize.least_squares`. Its default
+stopping tolerances (1e-8) can leave a high-SNR fit (e.g. Kepler KOI-1) short of the minimum by more
+than the formal errors; for a tightly converged fit use, for example,
+`fitTransitModel(sol, params_to_fit, phot, ftol=1e-14, xtol=1e-14, gtol=1e-14, max_nfev=2000)`.
 
 ### DE-MCMC (`pytfit5.transitmcmc`)
 
@@ -482,11 +487,16 @@ Samplers and diagnostics (`mcmcroutines`): `mhgmcmc`, `demhmcmc`, `genchain`, `g
 
 ## Synthetic Light Curves (`pytfit5.synthetic`)
 
-### `generate_synthetic_lightcurve(t0, per, time_length, depth, snr, cadence=1/48, stellar_noise_type='multi', stellar_noise_amplitude=0.003, rotation_period=None, seed=None)`
+### `generate_synthetic_lightcurve(t0, per, time_length, depth, snr, cadence=1/48, stellar_noise_type='multi', stellar_noise_amplitude=0.003, rotation_period=None, seed=None, nintg=41, itime=None)`
 
 One planet (circular orbit) modelled with `transitModel`, plus white and stellar noise.
 
 - `t0`, `per`, `time_length` (days); `depth` (fractional); `cadence` (days).
+- `itime`: exposure time per point (days). The default (`None`) is the cadence, i.e. no dead time;
+  set it when the exposure is shorter than the cadence, e.g. Roman: `cadence=12.1/1440`,
+  `itime=67/86400`.
+- `nintg`: sub-exposures used to average the model over each exposure (default 41). Use a large value
+  (e.g. 1001) for a "true" light curve against which fits with fewer sub-exposures are tested.
 - `snr`: the white noise σ is set so that Σ(in-transit signal) / (σ √n_in) = `snr`.
 - `stellar_noise_type`: `"none"`, `"red"` (1/f^α), `"drw"` (damped random walk), `"multi"`
   (granulation + activity DRWs, plus spot modulation if `rotation_period` is given), with RMS amplitude
