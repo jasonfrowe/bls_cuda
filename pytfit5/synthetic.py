@@ -142,6 +142,8 @@ def generate_synthetic_lightcurve(
     stellar_noise_amplitude=0.003,
     rotation_period=None,
     seed: Optional[int] = None,
+    nintg: int = 41,
+    itime: Optional[float] = None,
 ) -> Tuple[tpy5.phot_class, transitm.transit_model_class]:
     """
     Generate a synthetic lightcurve using PyTFit5 transit model for BLS testing.
@@ -169,6 +171,11 @@ def generate_synthetic_lightcurve(
         Stellar rotation period for spot modulation (days)
     seed : int, optional
         Random seed for reproducibility
+    nintg : int, optional
+        Sub-exposures used to average the model over each exposure (default 41). Use a large
+        value (e.g. 1001) for a "true" light curve against which fits with fewer are tested.
+    itime : float, optional
+        Exposure time per point (days); default the cadence (no dead time).
 
     Assumptions
     -----------
@@ -194,7 +201,7 @@ def generate_synthetic_lightcurve(
     time = np.arange(npts, dtype=float) * cadence
     
     # Integration time array (assume same as cadence for simplicity)
-    itime = np.full_like(time, cadence)
+    itime = np.full_like(time, cadence if itime is None else itime)
 
     # Create transit model solution
     sol = transitm.transit_model_class()
@@ -223,7 +230,6 @@ def generate_synthetic_lightcurve(
 
     # Generate noiseless model flux around baseline ~1.0
     # Use transitModel as in plotTransit: tmodel = transitModel(sol, time, itime, nintg, ntt, tobs, omc) - zpt
-    nintg = 41  # Number of integration points
     ntt = -1    # No TTVs
     tobs = -1   # No TTV observations
     omc = -1    # No TTV O-C

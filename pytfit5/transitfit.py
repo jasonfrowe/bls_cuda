@@ -102,13 +102,16 @@ def createBounds(time, id_to_fit, sol_obj):
 
     return (lower_bound[id_to_fit], upper_bound[id_to_fit])
 
-def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc=-1):
+def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc=-1, **ls_kwargs):
     """
     Function to call for fitting
 
     sol_obj: Transit model object with initial parameters
     params_to_fit: List containing strings of the names of the parameters to fit according to the tm class
     phot: Phot object from reading data file
+    ls_kwargs: passed to scipy.optimize.least_squares, e.g. ftol=1e-12, xtol=1e-12, gtol=1e-12 for a
+           tighter convergence than its defaults (useful at very high SNR, where the default stopping
+           point can differ between runs by more than the formal errors)
 
     return: New transit model object containing the parameters and errors after fitting
     """
@@ -168,13 +171,7 @@ def fitTransitModel(sol_obj, params_to_fit, phot, nintg=41, ntt=-1, tobs=-1, omc
 
 
     res = least_squares(wrapperTransit, _coerce_array(sol[id_to_fit], np.float64), bounds=bounds, \
-                        args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc))
-
-    # res = least_squares(wrapperTransit, sol[id_to_fit], bounds=bounds, \
-    #                     args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc),
-    #                    ftol=1e-12, # Change in cost
-    #                    xtol=1e-12, # Change in parameters
-    #                    gtol=1e-12)
+                        args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc), **ls_kwargs)
 
     # res = least_squares(wrapperTransit, sol[id_to_fit], \
     #                     args=(time, flux, ferror, itime, sol_obj.npl, nintg, ntt, tobs, omc),
